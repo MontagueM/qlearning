@@ -86,7 +86,7 @@ def test_epsilons():
 
 
 def test_learning_types():
-    policy_types = [LearningType.QLearningOffPolicy, LearningType.TabularDifferenceOnPolicy]
+    policy_types = [LearningType.QLearningOffPolicy, LearningType.SARSAOnPolicy]
     game_cutoff = 1_500
     reruns = 3
     time = int(datetime.datetime.now().timestamp())
