@@ -1,6 +1,8 @@
+import datetime
 import itertools
 import random
 from typing import List, override, Tuple
+from enum import Enum
 
 import numpy as np
 
@@ -35,17 +37,25 @@ class History:
     action: Direction
 
 
+@dataclass
+class LearningType(Enum):
+    QLearningOffPolicy = 0
+    TabularDifferenceOnPolicy = 1
+
+
 class QLearningSnakeGame(AbstractSnakeGame):
     learning_rate = 0.7
     discount_factor = 0.5
     epsilon = 0.1
 
-    def __init__(self, q_values):
-        super().__init__()
+    def __init__(self, q_values, use_renderer=True):
+        super().__init__(use_renderer)
         self.frametime = 50
 
         self.history: List[History] = []
         self.q_values = q_values
+
+        self.learning_type = LearningType.QLearningOffPolicy
 
     @override
     def get_action(self) -> Direction:
@@ -67,20 +77,19 @@ class QLearningSnakeGame(AbstractSnakeGame):
         snake_head = self.snake[0]
         distance_to_food = self.food_location - snake_head
 
-
         if distance_to_food.x > 0:
-            pos_x = '1' # Food is to the right of the snake
+            pos_x = '1'  # Food is to the right of the snake
         elif distance_to_food.x < 0:
-            pos_x = '0' # Food is to the left of the snake
+            pos_x = '0'  # Food is to the left of the snake
         else:
-            pos_x = 'NA' # Food and snake are on the same X file
+            pos_x = 'NA'  # Food and snake are on the same X file
 
         if distance_to_food.y > 0:
-            pos_y = '3' # Food is below snake
+            pos_y = '3'  # Food is below snake
         elif distance_to_food.y < 0:
-            pos_y = '2' # Food is above snake
+            pos_y = '2'  # Food is above snake
         else:
-            pos_y = 'NA' # Food and snake are on the same Y file
+            pos_y = 'NA'  # Food and snake are on the same Y file
 
         sqs = [
             Coordinate(snake_head.x - self.block_size, snake_head.y),
@@ -93,7 +102,7 @@ class QLearningSnakeGame(AbstractSnakeGame):
         for sq in sqs:
             if sq.x < 0 or sq.y < 0:  # off-screen left or top
                 surrounding_list.append('1')
-            elif sq.x>= self.dimensions[0] or sq.y >= self.dimensions[1]:  # off-screen right or bottom
+            elif sq.x >= self.dimensions[0] or sq.y >= self.dimensions[1]:  # off-screen right or bottom
                 surrounding_list.append('1')
             elif sq in self.snake[1:-1]:  # part of tail
                 surrounding_list.append('2')
@@ -139,6 +148,12 @@ class QLearningSnakeGame(AbstractSnakeGame):
         else:
             reward = -1  # Snake is further from the food, negative reward
 
+        # discourage going back to where you came from to avoid oscillation
+        if len(self.history) > 2:
+            sm1 = self.history[-3].state  # state before previous state
+            if sm1 == s1:
+                reward += -1
+
         # if s0.surroundings[0] == '2' or s0.surroundings[1] == '2' or s0.surroundings[2] == '2' or s0.surroundings[3] == '2':
         #     reward += -1
 
@@ -147,7 +162,15 @@ class QLearningSnakeGame(AbstractSnakeGame):
 
         s1q = s1.q_state()
         s0q = s0.q_state()
-        self.q_values[s0q][a0.value] += self.learning_rate * (reward + self.discount_factor * max(self.q_values[s1q]) - self.q_values[s0q][a0.value])
+
+        match self.learning_type:
+            case LearningType.QLearningOffPolicy:
+                self.q_values[s0q][a0.value] += self.learning_rate * (reward + self.discount_factor * max(self.q_values[s1q]) - self.q_values[s0q][a0.value])
+            case LearningType.TabularDifferenceOnPolicy:
+                a1 = self.history[-1].action
+                self.q_values[s0q][a0.value] += self.learning_rate * (reward + self.discount_factor * self.q_values[s1q][a1.value] - self.q_values[s0q][a0.value])
+            case other:
+                raise ValueError(f"Invalid learning type: {other}")
 
 
 if __name__ == "__main__":
@@ -169,12 +192,18 @@ if __name__ == "__main__":
         q_values = states
 
     game_count = 0
+    game_count_cap = 5000
     dump_every_n_games = 100
-    while True:
-        game = QLearningSnakeGame(q_values)
+    epsilon_trigger = 100
+    desc = f"fromzero_e{epsilon_trigger}"
+    filename = f"qlearning_{desc}_{int(datetime.datetime.now().timestamp())}_{game_count_cap}.txt"
+    with open(filename, 'w') as f:
+        f.write(f"Game,Score\n")
+    while game_count < game_count_cap:
+        game = QLearningSnakeGame(q_values, False)
         # if game_count % 100 == 0 and game_count > 90:
         #     game.epsilon *= 0.5
-        if game_count > 100:
+        if game_count > epsilon_trigger:
             game.epsilon = 0
         game.frametime = 50_000
         game.block_size = 10
@@ -185,3 +214,6 @@ if __name__ == "__main__":
 
         if game_count % dump_every_n_games == 0:
             np.save(f"q_values.npy", q_values)
+
+        with open(filename, 'a') as f:
+            f.write(f"{game_count},{game.get_score()},{game.death_reason}\n")

@@ -5,10 +5,18 @@ import pygame
 import random
 from typing import List, Tuple, Any
 from misc import Direction, Coordinate
+from enum import Enum
+
+
+class DeathReason(Enum):
+    NONE = -1
+    WALL = 0
+    TAIL = 1
 
 
 class AbstractSnakeGame:
-    def __init__(self):
+    def __init__(self, use_renderer):
+        self.render = use_renderer
         self.snake_alive: bool = True
         self.snake: List[Coordinate] = []
         self.dimensions: Tuple[int, int] = (600, 400)
@@ -18,25 +26,29 @@ class AbstractSnakeGame:
         self.block_size: int = 20
         self.frametime: int = 10
         self.move_direction: Direction = Direction.NONE
+        self.death_reason: DeathReason = DeathReason.NONE
 
     def play(self):
-        pygame.init()
-        pygame.display.set_caption('Snake')
-        self.clock = pygame.time.Clock()
-        self.display = pygame.display.set_mode(self.dimensions)
+        if self.render:
+            pygame.init()
+            pygame.display.set_caption('Snake')
+            self.clock = pygame.time.Clock()
+            self.display = pygame.display.set_mode(self.dimensions)
         self.snake.append(Coordinate(self.dimensions[0] // 2, self.dimensions[1] // 2))
         self.food_location = self.generate_food()
 
         while self.snake_alive:
             self.handle_events()
             self.update()
-            self.draw()
-            self.clock.tick(self.frametime)
+            if self.render:
+                self.draw()
+                self.clock.tick(self.frametime)
 
     def handle_events(self):
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.snake_alive = False
+        if self.render:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.snake_alive = False
 
         new_direction = self.get_action()
         if new_direction == Direction.NONE and self.move_direction == Direction.NONE:
@@ -80,16 +92,23 @@ class AbstractSnakeGame:
         for coord in self.snake[1:]:
             if self.snake[0].x == coord.x and self.snake[0].y == coord.y:
                 self.snake_alive = False
+                self.death_reason = DeathReason.TAIL
                 break
 
         # temp check if head is out of bounds
         if self.snake[0].x < 0 or self.snake[0].x >= self.dimensions[0] or self.snake[0].y < 0 or self.snake[0].y >= self.dimensions[1]:
             self.snake_alive = False
+            self.death_reason = DeathReason.WALL
 
-    def generate_food(self):
+    def generate_food(self) -> Coordinate:
         x = random.randint(0, (self.dimensions[0] - self.block_size)//self.block_size) * self.block_size
         y = random.randint(0, (self.dimensions[1] - self.block_size)//self.block_size) * self.block_size
-        return Coordinate(x, y)
+
+        xy = Coordinate(x, y)
+        if xy in self.snake:
+            return self.generate_food()
+
+        return xy
 
     def draw(self):
         self.display.fill((0, 0, 0))
