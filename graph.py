@@ -58,7 +58,8 @@ def plot_deaths(all_deaths):
 
 if __name__ == '__main__':
     # top_folder = 'data/epsilon_cutoff/1703003251'
-    top_folder = 'data/policy_type/1703035101'
+    # top_folder = 'data/policy_type/1703035101'
+    top_folder = 'data/new_distance_measurement/1703091383'
     game_variants = {}
 
     all_scores = {}

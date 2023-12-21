@@ -97,6 +97,17 @@ def test_learning_types():
             run_game(hyperparameters, index, save_folder=f"data/policy_type/{time}/{policy_type}", renderer=False)
 
 
+def pure_test(desc):
+    game_cutoff = 2_000
+    hyperparameters = Hyperparameters(game_cutoff=game_cutoff)
+    reruns = 3
+    time = int(datetime.datetime.now().timestamp())
+    for index in range(reruns):
+        print(f"Running run {index+1}/{reruns}...")
+        run_game(hyperparameters, index, save_folder=f"data/{desc}/{time}/main/", renderer=False)
+
+
 if __name__ == "__main__":
     # test_epsilons()
-    test_learning_types()
+    # test_learning_types()
+    pure_test("new_distance_measurement")

@@ -1,7 +1,7 @@
 import datetime
 import itertools
 import random
-from typing import List, override, Tuple
+from typing import List, Tuple
 from enum import Enum
 
 import numpy as np
@@ -58,7 +58,6 @@ class QLearningSnakeGame(AbstractSnakeGame):
 
         self.learning_type = LearningType.QLearningOffPolicy
 
-    @override
     def get_action(self) -> Direction:
         state = self.get_state()
 
@@ -143,9 +142,8 @@ class QLearningSnakeGame(AbstractSnakeGame):
         # reward is defined as acquired AFTER the action is taken (SARSA), so this is previous-state reward
         if s1.food_position != s0.food_position:  # Snake ate a food, positive reward
             reward = 3
-        elif s1.distance_to_food.length() < s0.distance_to_food.length():  # Snake is closer to the food, positive reward
+        elif abs(s1.distance_to_food.x) < abs(s0.distance_to_food.x) or abs(s1.distance_to_food.y) < abs(s0.distance_to_food.y):  # Snake is closer to the food, positive reward
             reward = 1
-        # if snake next to tail, negative reward
         else:
             reward = -1  # Snake is further from the food, negative reward
 
@@ -170,12 +168,12 @@ class QLearningSnakeGame(AbstractSnakeGame):
                 self.q_values[s0q][a0.value] += self.learning_rate * (reward + self.discount_factor * self.q_values[s1q][a1.value] - self.q_values[s0q][a0.value])
             case LearningType.QLearningOffPolicy:
                 self.q_values[s0q][a0.value] += self.learning_rate * (reward + self.discount_factor * max(self.q_values[s1q]) - self.q_values[s0q][a0.value])
-            case LearningType.FittedQLearning:
-                loss = reward + self.discount_factor * max(self.q_values[s1q]) - self.q_values[s0q][a0.value]
-                lsq_loss = loss ** 2
-                phi = None
-                phi_update = self.learning_rate * loss * delta_phi
-                phi += phi_update
+            # case LearningType.FittedQLearning:
+            #     loss = reward + self.discount_factor * max(self.q_values[s1q]) - self.q_values[s0q][a0.value]
+            #     lsq_loss = loss ** 2
+            #     phi = None
+            #     phi_update = self.learning_rate * loss * delta_phi
+            #     phi += phi_update
             case other:
                 raise ValueError(f"Invalid learning type: {other}")
 
