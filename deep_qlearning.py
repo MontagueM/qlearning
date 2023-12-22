@@ -123,15 +123,15 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     # net_inputs = (num_states + num_actions) * temporal_window + num_states
     net_inputs = num_states * temporal_window
     num_inputs = num_states
-    hidden_nodes_1 = 288
-    hidden_nodes_2 = 36
+    hidden_nodes_1 = 256
+    hidden_nodes_2 = hidden_nodes_1
 
     train_start = 5000
     batch_size = 32
     mem_size = 100_000
 
     learning_rate = 0.001
-    discount_factor = 0.9
+    discount_factor = 0.95
     epsilon = 1.0
     epsilon_min = 0.1
     eps_steps = 100_000
@@ -140,6 +140,17 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
     target_model_update = 10_000
 
+    num_frames = 4
+    # target_model = nn.Sequential(
+    #     nn.Conv2d(num_frames, 16, kernel_size=3, stride=1),
+    #     nn.ReLU(),
+    #     nn.Conv2d(16, 32, kernel_size=3, stride=1),
+    #     nn.ReLU(),
+    #     nn.Flatten(),
+    #     nn.Linear(256, 512),
+    #     nn.ReLU(),
+    #     nn.Linear(512, num_actions)
+    # )
     target_model = nn.Sequential(
         nn.Linear(num_inputs, hidden_nodes_1),
         nn.ReLU(),
@@ -370,7 +381,6 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         # loss.backward()
         # self.optimizer.step()
 
-        self.optimizer.zero_grad()
 
         predicted = self.model(states)
 
@@ -382,11 +392,23 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         discount_factor_tensor = torch.full_like(dead, self.discount_factor, dtype=torch.float32)
         discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
 
-        expected = predicted.clone()
+        target = predicted.clone()
 
         # update each action with the expected q value, leave the rest the same as did not change
-        expected[batch_indices, actions] = rewards + discount_factor_tensor * q1
-        loss = self.criterion(predicted, expected)
+        target[batch_indices, actions] = rewards + discount_factor_tensor * q1
+
+        # predicted = self.model(states)
+        #
+        # target = predicted.clone()
+        # for idx in range(len(dead)):
+        #     Q_new = rewards[idx]
+        #     if not dead[idx]:
+        #         Q_new = rewards[idx] + self.discount_factor * torch.max(self.model(next_states[idx]))
+        #
+        #     target[idx][torch.argmax(actions[idx]).item()] = Q_new
+
+        self.optimizer.zero_grad()
+        loss = self.criterion(predicted, target)
         loss_float = loss.item()
         loss.backward()
         self.optimizer.step()
@@ -425,7 +447,7 @@ if __name__ == "__main__":
         #     game.epsilon *= 0.5
         # if game_count > epsilon_trigger:
         #     game.epsilon = 0
-        game.epsilon = max(game.epsilon_min, 1.0 - (global_count / game.eps_steps))
+        game.epsilon = max(0, 1.0 - (game_count / 500))
         epsilons.append(game.epsilon)
         game.frametime = 50
         game.block_size = 10
