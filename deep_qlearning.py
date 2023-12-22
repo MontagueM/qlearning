@@ -89,6 +89,10 @@ class DeepQLearningLoss(nn.Module):
         loss = rewards + discount_factor_tensor * q1 - q0
         lsq_loss = loss ** 2
 
+        if any(dead):
+            # print("dead")
+            pass
+
         return lsq_loss.mean()
 
 def weights_init(layer_in):
@@ -119,15 +123,15 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     # net_inputs = (num_states + num_actions) * temporal_window + num_states
     net_inputs = num_states * temporal_window
     num_inputs = num_states
-    hidden_nodes_1 = 256
-    hidden_nodes_2 = hidden_nodes_1
+    hidden_nodes_1 = 288
+    hidden_nodes_2 = 36
 
     train_start = 5000
     batch_size = 32
     mem_size = 100_000
 
-    learning_rate = 0.00025
-    discount_factor = 0.99
+    learning_rate = 0.001
+    discount_factor = 0.9
     epsilon = 1.0
     epsilon_min = 0.1
     eps_steps = 100_000
@@ -285,6 +289,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         rewards.append(reward)
 
+        # fix
         if not self.snake_alive:
             reward = -5
             self.replay_memory.append(
@@ -311,9 +316,11 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         batch = random.sample(self.replay_memory, self.batch_size)
         rewards = torch.tensor([exp.reward for exp in batch])
         if any([exp.dead for exp in batch]):
-            print("dead")
+            # print("dead")
+            pass
         if any([exp.reward > 1 for exp in batch]):
-            print("reward")
+            # print("reward")
+            pass
         states = torch.stack([exp.state.tensor() for exp in batch])
         actions = torch.tensor([exp.action.value for exp in batch])
         # one-hot encode actions as all action values are equally valuable, e.g. 3 is not better than 2
@@ -332,34 +339,55 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         # state_and_next_state = torch.cat((states, next_states), dim=1)
         # predicted = self.model(states)
 
+        # q0_actions = self.target_model(states)
+        # batch_indices = torch.arange(len(actions))
+        # q0 = q0_actions[batch_indices, actions]
+        # q1 = torch.max(self.target_model(next_states), dim=1).values
+        #
+        # # discount_factor_tensor = torch.full((self.batch_size, 4), self.discount_factor, dtype=torch.float32)
+        # # discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
+        #
+        # # expected = predicted.clone()
+        # q0 = self.model(states)
+        # q1 = self.model(next_states)
+        #
+        # # update each action with the expected q value, leave the rest the same as did not change
+        # delta = np.zeros((self.batch_size, self.num_actions))
+        # delta[np.arange(self.batch_size), actions] = 1
+        # delta = torch.tensor(delta, dtype=torch.float32)
+        #
+        # dead = dead.repeat_interleave(self.num_actions).reshape(self.batch_size, self.num_actions)
+        # rewards = rewards.repeat_interleave(self.num_actions).reshape(self.batch_size, self.num_actions)
+        #
+        # # expected[batch_indices, actions] = rewards + discount_factor_tensor * q1
+        # targets = (1 - delta) * q0 + delta * (rewards + ~dead * self.discount_factor * q1)
+        #
+        # loss = self.criterion(q0, targets)
+        # loss_float = loss.item()
+        #
+        # self.optimizer.zero_grad()
+        #
+        # loss.backward()
+        # self.optimizer.step()
+
+        self.optimizer.zero_grad()
+
+        predicted = self.model(states)
+
         q0_actions = self.target_model(states)
         batch_indices = torch.arange(len(actions))
         q0 = q0_actions[batch_indices, actions]
         q1 = torch.max(self.target_model(next_states), dim=1).values
 
-        # discount_factor_tensor = torch.full((self.batch_size, 4), self.discount_factor, dtype=torch.float32)
-        # discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
+        discount_factor_tensor = torch.full_like(dead, self.discount_factor, dtype=torch.float32)
+        discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
 
-        # expected = predicted.clone()
-        q0 = self.model(states)
-        q1 = self.model(next_states)
+        expected = predicted.clone()
 
         # update each action with the expected q value, leave the rest the same as did not change
-        delta = np.zeros((self.batch_size, self.num_actions))
-        delta[np.arange(self.batch_size), actions] = 1
-        delta = torch.tensor(delta, dtype=torch.float32)
-
-        dead = dead.repeat_interleave(self.num_actions).reshape(self.batch_size, self.num_actions)
-        rewards = rewards.repeat_interleave(self.num_actions).reshape(self.batch_size, self.num_actions)
-
-        # expected[batch_indices, actions] = rewards + discount_factor_tensor * q1
-        targets = (1 - delta) * q0 + delta * (rewards + ~dead * self.discount_factor * q1)
-
-        loss = self.criterion(q0, targets)
+        expected[batch_indices, actions] = rewards + discount_factor_tensor * q1
+        loss = self.criterion(predicted, expected)
         loss_float = loss.item()
-
-        self.optimizer.zero_grad()
-
         loss.backward()
         self.optimizer.step()
 
