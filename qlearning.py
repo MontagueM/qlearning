@@ -82,14 +82,14 @@ class QLearningSnakeGame(AbstractSnakeGame):
         elif distance_to_food.x < 0:
             pos_x = '0'  # Food is to the left of the snake
         else:
-            pos_x = 'NA'  # Food and snake are on the same X file
+            pos_x = '4'  # Food and snake are on the same X file
 
         if distance_to_food.y > 0:
             pos_y = '3'  # Food is below snake
         elif distance_to_food.y < 0:
             pos_y = '2'  # Food is above snake
         else:
-            pos_y = 'NA'  # Food and snake are on the same Y file
+            pos_y = '4'  # Food and snake are on the same Y file
 
         sqs = [
             Coordinate(snake_head.x - self.block_size, snake_head.y),
@@ -185,8 +185,8 @@ if __name__ == "__main__":
         q_values = np.load('q_values.npy', allow_pickle=True).item()
     else:
         sqs = [''.join(s) for s in list(itertools.product(*[['0', '1', '2']] * 4))]
-        widths = ['0', '1', 'NA']
-        heights = ['2', '3', 'NA']
+        widths = ['0', '1', '4']
+        heights = ['2', '3', '4']
 
         states = {}
         for i in widths:
