@@ -29,19 +29,13 @@ class QState:
     def __hash__(self):
         return hash((self.relative_food_direction, self.surroundings))
 
-
-
-
 @dataclass
 class State:
     distance_to_food: Vector
     relative_food_direction: tuple
     surroundings: str
     food_position: Coordinate  # only used to know if snake ate food
-
-    def tensor(self):
-        return torch.tensor([float(self.relative_food_direction[0]), float(self.relative_food_direction[1]), *[float(x) for x in list(self.surroundings)]])
-
+    grid: torch.Tensor
 
 @dataclass
 class Experience:
@@ -126,14 +120,14 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     hidden_nodes_1 = 256
     hidden_nodes_2 = hidden_nodes_1
 
-    train_start = 1000
+    train_start = 5000
     batch_size = 32
     mem_size = 100_000
 
     learning_rate = 0.001
     discount_factor = 0.95
     epsilon = 1.0
-    epsilon_min = 0.0
+    epsilon_min = 0.001
     eps_steps = 100_000
 
     replay_memory = deque(maxlen=mem_size)
@@ -141,30 +135,45 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     target_model_update = 10_000
 
     num_frames = 4
-    # target_model = nn.Sequential(
-    #     nn.Conv2d(num_frames, 16, kernel_size=3, stride=1),
-    #     nn.ReLU(),
-    #     nn.Conv2d(16, 32, kernel_size=3, stride=1),
-    #     nn.ReLU(),
-    #     nn.Flatten(),
-    #     nn.Linear(256, 512),
-    #     nn.ReLU(),
-    #     nn.Linear(512, num_actions)
-    # )
+    num_channels = 3
+
+    kernel_1 = 3
+    kernel_2 = 3
+    stride_1 = 1
+    stride_2 = 1
+    padding = 0
+    out_channels_1 = 16
+    out_channels_2 = 32
+    input_width = 10
+    input_height = 10
+    conv1_output_width = (input_width - kernel_2 + 2 * padding) // stride_1 + 1
+    conv1_output_height = (input_height - kernel_1 + 2 * padding) // stride_1 + 1
+    conv2_output_width = (conv1_output_width - kernel_2 + 2 * padding) // stride_2 + 1
+    conv2_output_height = (conv1_output_height - kernel_2 + 2 * padding) // stride_2 + 1
+    linear_input_size = conv2_output_width * conv2_output_height * out_channels_2
+    print(f"linear input size: {linear_input_size}")
+
+    features = 256
     target_model = nn.Sequential(
-        nn.Linear(num_inputs, hidden_nodes_1),
+        nn.Conv2d(num_channels, out_channels_1, kernel_size=kernel_1, stride=stride_1, padding=padding),
         nn.ReLU(),
-        # nn.Linear(hidden_nodes_1, hidden_nodes_2),
-        # nn.ReLU(),
-        nn.Linear(hidden_nodes_2, num_actions)
+        nn.Conv2d(out_channels_1, out_channels_2, kernel_size=kernel_2, stride=stride_2, padding=padding),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(linear_input_size, features),
+        nn.ReLU(),
+        nn.Linear(features, num_actions)
     )
 
     model = nn.Sequential(
-        nn.Linear(num_inputs, hidden_nodes_1),
+        nn.Conv2d(num_channels, out_channels_1, kernel_size=kernel_1, stride=stride_1, padding=padding),
         nn.ReLU(),
-        # nn.Linear(hidden_nodes_1, hidden_nodes_2),
-        # nn.ReLU(),
-        nn.Linear(hidden_nodes_2, num_actions)
+        nn.Conv2d(out_channels_1, out_channels_2, kernel_size=kernel_2, stride=stride_2, padding=padding),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(linear_input_size, features),
+        nn.ReLU(),
+        nn.Linear(features, num_actions)
     )
 
     # He initialization of weights
@@ -204,7 +213,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         # NN forward pass
         # state to tensor
-        state_tensor = state.tensor()
+        state_tensor = state.grid
 
         # prev_state_tensor = self.history[-1].state.tensor()
         # if prev_state is not None:
@@ -214,6 +223,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         # concat prev state and current state
         # state_tensor_all = torch.cat((prev_state_tensor, state_tensor))
+        state_tensor = state_tensor.unsqueeze(0)
         action_tensor = self.model(state_tensor)
         action = action_tensor.argmax().item()
 
@@ -224,6 +234,18 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         return action_direction
 
     def get_state(self) -> State:
+        # convert stateful info into 2d grid with 3 channels
+        grid = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size, 3))
+        # food is green
+        grid[self.food_location.x // self.block_size, self.food_location.y // self.block_size, 1] = 1
+        # snake head is red
+        grid[self.snake[0].x // self.block_size, self.snake[0].y // self.block_size, 0] = 1
+        # snake body is white
+        for body_part in self.snake[1:]:
+            grid[body_part.x // self.block_size, body_part.y // self.block_size, :] = 1
+
+        # todo interesting question of if we need to include the wall or not? wonder how it affects perf
+
         snake_head = self.snake[0]
         distance_to_food = self.food_location - snake_head
 
@@ -260,7 +282,9 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
                 surrounding_list.append('0')
         surroundings = ''.join(surrounding_list)
 
-        return State(distance_to_food, (pos_x, pos_y), surroundings, self.food_location)
+        # permute to fit BATCH x CHANNELS x HEIGHT x WIDTH
+        grid = torch.tensor(grid, dtype=torch.float32).permute(2, 0, 1)
+        return State(distance_to_food, (pos_x, pos_y), surroundings, self.food_location, grid)
 
     def update(self):
         super().update()
@@ -282,13 +306,9 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         current = self.history[-1]  # current state
         previous = self.history[-2]  # previous state
 
-        # scale reward by number of iterations since last food
-        # scale = 10 / (self.local_count - self.food_iterations[-1])
-        scale = 1
-
         # reward is defined as acquired AFTER the action is taken (SARSA), so this is previous-state reward
         if current.state.food_position != previous.state.food_position:  # Snake ate a food, positive reward
-            reward = 100 * scale
+            reward = 3
             self.food_iterations.append(self.local_count - self.food_iterations[-1])
         elif abs(current.state.distance_to_food.x) < abs(previous.state.distance_to_food.x) or abs(current.state.distance_to_food.y) < abs(previous.state.distance_to_food.y):  # Snake is closer to the food, positive reward
             reward = 1
@@ -296,12 +316,11 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         else:
             reward = -1  # Snake is further from the food, negative reward
 
-
         # discourage going back to where you came from to avoid oscillation
-        # if len(self.history) > 2:
-        #     sm1 = self.history[-3].state  # state before previous state
-        #     if sm1 == h1.state:
-        #         reward += -2
+        if len(self.history) > 2:
+            sm1 = self.history[-3].state  # state before previous state
+            if sm1.grid.tolist() == current.state.grid.tolist():
+                reward += -2
 
 
         rewards.append(reward)
@@ -332,11 +351,11 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         batch = random.sample(self.replay_memory, self.batch_size)
         rewards = torch.tensor([exp.reward for exp in batch])
-        states = torch.stack([exp.state.tensor() for exp in batch])
+        states = torch.stack([exp.state.grid for exp in batch])
         actions = torch.tensor([exp.action.value for exp in batch])
         # one-hot encode actions as all action values are equally valuable, e.g. 3 is not better than 2
         # actions_onehot = self.get_onehot(actions)
-        next_states = torch.stack([exp.next_state.tensor() for exp in batch])
+        next_states = torch.stack([exp.next_state.grid for exp in batch])
         dead = torch.tensor([exp.dead for exp in batch])
 
         predicted = self.model(states)
@@ -391,18 +410,19 @@ if __name__ == "__main__":
         f.write(f"Game,Score\n")
     while game_count < game_count_cap:
         game = DeepQLearningSnakeGame(state_dict, True)
+        game.dimensions = (100, 100)
         if game_count == 0:
             num_params = sum(p.numel() for p in game.model.parameters())
             print(f"Number of parameters: {num_params}")
-        game.dimensions = (100, 100)
+
         # if game_count % 100 == 0 and game_count > 90:
         #     game.epsilon *= 0.5
         # if game_count > epsilon_trigger:
         #     game.epsilon = 0
-        game.epsilon = max(game.epsilon_min, 1.0 - (game_count / 10))
+        game.epsilon = max(game.epsilon_min, 1.0 - (game_count / 300)**2)
         # game.epsilon = 0
         epsilons.append(game.epsilon)
-        game.frametime = 50
+        game.frametime = 50_000
         game.block_size = 10
         rewards = []
         losses = []
@@ -419,7 +439,7 @@ if __name__ == "__main__":
         _rewards_sum.append(np.sum(rewards))
         _rewards_mean.append(np.mean(rewards))
         death_reasons.append(game.death_reason)
-        iterations.append(game.local_count / game.get_score() if game.get_score() != 0 else 0)
+        iterations.append(game.local_count / game.get_score() if game.get_score() != 0 else game.local_count)
         iteration_foods.append(np.mean(game.food_iterations))
 
         if game_count % running_trend == 0:
@@ -439,6 +459,8 @@ if __name__ == "__main__":
 
         # display.clear_output(wait=True)
         # display.display(plt.gcf())
+        plt.close('all')
+
         plt.clf()
 
         fig, axs = plt.subplots(7, figsize=(5, 10), sharex=True)
@@ -499,4 +521,4 @@ if __name__ == "__main__":
         fig.canvas.draw()
         fig.canvas.flush_events()
         # plt.pause(.1)
-        plt.close()
+        # plt.close()

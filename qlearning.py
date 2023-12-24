@@ -198,7 +198,7 @@ if __name__ == "__main__":
     game_count = 0
     game_count_cap = 5000
     dump_every_n_games = 100
-    epsilon_trigger = 100
+    epsilon_trigger = 10
     desc = f"fromzero_e{epsilon_trigger}"
     filename = f"qlearning_{desc}_{int(datetime.datetime.now().timestamp())}_{game_count_cap}.txt"
     with open(filename, 'w') as f:
