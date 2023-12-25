@@ -1,5 +1,6 @@
 import datetime
 import itertools
+import os
 import random
 from typing import List, Tuple
 from enum import Enum
@@ -120,14 +121,16 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     hidden_nodes_1 = 256
     hidden_nodes_2 = hidden_nodes_1
 
-    train_start = 5000
+    # mini-batches are preferable to larger 1. speed 2. performs better apparently
+    # also more commonly referenced in papers like https://arxiv.org/pdf/1312.5602.pdf
     batch_size = 32
+    train_start = batch_size*2
     mem_size = 100_000
 
     learning_rate = 0.001
     discount_factor = 0.95
     epsilon = 1.0
-    epsilon_min = 0.001
+    epsilon_min = 0.0
     eps_steps = 100_000
 
     replay_memory = deque(maxlen=mem_size)
@@ -146,11 +149,19 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     out_channels_2 = 32
     input_width = 10
     input_height = 10
+    max_pool_kernel = 1
     conv1_output_width = (input_width - kernel_2 + 2 * padding) // stride_1 + 1
     conv1_output_height = (input_height - kernel_1 + 2 * padding) // stride_1 + 1
-    conv2_output_width = (conv1_output_width - kernel_2 + 2 * padding) // stride_2 + 1
-    conv2_output_height = (conv1_output_height - kernel_2 + 2 * padding) // stride_2 + 1
-    linear_input_size = conv2_output_width * conv2_output_height * out_channels_2
+    max_pool_stride = 1
+    dilation = 1
+    maxpool1_output_width = (conv1_output_width + 2 * padding - dilation * (max_pool_kernel - 1) - 1) // max_pool_stride + 1
+    maxpool1_output_height = (conv1_output_height + 2 * padding - dilation * (max_pool_kernel - 1) - 1) // max_pool_stride + 1
+    conv2_output_width = (maxpool1_output_width - kernel_2 + 2 * padding) // stride_2 + 1
+    conv2_output_height = (maxpool1_output_height - kernel_2 + 2 * padding) // stride_2 + 1
+    maxpool2_output_width = (conv2_output_width + 2 * padding - dilation * (max_pool_kernel - 1) - 1) // max_pool_stride + 1
+    maxpool2_output_height = (conv2_output_height + 2 * padding - dilation * (max_pool_kernel - 1) - 1) // max_pool_stride + 1
+    # linear_input_size = maxpool2_output_width * maxpool2_output_height * out_channels_2
+    linear_input_size = 1152
     print(f"linear input size: {linear_input_size}")
 
     features = 256
@@ -159,22 +170,26 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         nn.ReLU(),
         nn.Conv2d(out_channels_1, out_channels_2, kernel_size=kernel_2, stride=stride_2, padding=padding),
         nn.ReLU(),
+        nn.AdaptiveMaxPool2d(6),
         nn.Flatten(),
-        nn.Linear(linear_input_size, features),
+        nn.Linear(32*6*6, features),
         nn.ReLU(),
         nn.Linear(features, num_actions)
     )
+    # target_model.compile()
 
     model = nn.Sequential(
         nn.Conv2d(num_channels, out_channels_1, kernel_size=kernel_1, stride=stride_1, padding=padding),
         nn.ReLU(),
         nn.Conv2d(out_channels_1, out_channels_2, kernel_size=kernel_2, stride=stride_2, padding=padding),
         nn.ReLU(),
+        nn.AdaptiveMaxPool2d(6),
         nn.Flatten(),
-        nn.Linear(linear_input_size, features),
+        nn.Linear(32*6*6, features),
         nn.ReLU(),
         nn.Linear(features, num_actions)
     )
+    # model.compile()
 
     # He initialization of weights
 
@@ -186,7 +201,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     criterion = nn.MSELoss()
 
     # set optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
 
     def __init__(self, state_dict=None, use_renderer=True):
         super().__init__(use_renderer)
@@ -197,11 +212,15 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         self.learning_type = LearningType.QLearningOffPolicy
 
         self.local_count = 0
+        self.action_every_n_frames = 1
 
         self.food_iterations = [0]
 
 
     def get_action(self) -> Direction:
+        if self.local_count % self.action_every_n_frames != 0:
+            return Direction.NONE
+
         state = self.get_state()
 
         # epsilon-greedy todo how does this work with model inference?
@@ -210,6 +229,9 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
             action_direction = Direction(action)
             self.history.append(History(state, action_direction))
             return action_direction
+
+        if global_count == self.train_start:
+            print("Starting training")
 
         # NN forward pass
         # state to tensor
@@ -341,6 +363,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         if global_count % self.target_model_update == 0:
             self.target_model.load_state_dict(self.model.state_dict())
+            self.target_model.eval()
 
         if global_count % 5_000 == 0:
             print(f"Global count: {global_count}")
@@ -406,29 +429,58 @@ if __name__ == "__main__":
     iteration_foods = []
     running_trend = 50
     epsilons = []
+
+    # mps seems to be better at large batch sizes e.g. 1024-2048
+    # torch.set_default_device("mps")
+    # device = torch.device("mps")
+    torch.set_default_device("cpu")
+    device = torch.device("cpu")
+
     with open(filename, 'w') as f:
         f.write(f"Game,Score\n")
+
+    timestamp = int(datetime.datetime.now().timestamp())
+    use_checkpoint = False
+    action_every_n_frames = 1
+
     while game_count < game_count_cap:
         game = DeepQLearningSnakeGame(state_dict, True)
-        game.dimensions = (100, 100)
+
+        game.dimensions = (200, 200)
         if game_count == 0:
             num_params = sum(p.numel() for p in game.model.parameters())
-            print(f"Number of parameters: {num_params}")
+            print(f"Number of parameters: {num_params}, mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
+
+            if use_checkpoint:
+                checkpoint = torch.load("data/cnn/1703464101/model_1200.pth", map_location=device)
+                game.model.load_state_dict(checkpoint["model_state_dict"])
+                game.model.train()
+                game.target_model.load_state_dict(checkpoint["target_model_state_dict"])
+                game.target_model.eval()
+                game.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+                print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+                print(f"New mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
+
+            game.model.to(device)
+            game.target_model.to(device)
 
         # if game_count % 100 == 0 and game_count > 90:
         #     game.epsilon *= 0.5
         # if game_count > epsilon_trigger:
         #     game.epsilon = 0
-        game.epsilon = max(game.epsilon_min, 1.0 - (game_count / 300)**2)
-        # game.epsilon = 0
+        game.epsilon = max(game.epsilon_min, 1.0 - (game_count / 200)**2)
+        if use_checkpoint:
+            game.epsilon = 0.01
         epsilons.append(game.epsilon)
         game.frametime = 50_000
+        game.action_every_n_frames = action_every_n_frames
         game.block_size = 10
         rewards = []
         losses = []
         game.play()
         game_count += 1
-        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}")
+        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}, Loss: {losses[-1]}")
         state_dict = game.model.state_dict()
 
         with open(filename, 'a') as f:
@@ -478,7 +530,7 @@ if __name__ == "__main__":
 
         axs[1].set_ylabel('Loss')
         axs[1].plot(_losses, 'k')
-        axs[1].set_ylim(ymin=0)
+        axs[1].set_ylim(ymin=0, ymax=2)
         axs[1].text(len(losses) - 1, losses[-1], str(losses[-1]))
 
         # axs[2].set_ylabel('Rew.S')
@@ -522,3 +574,14 @@ if __name__ == "__main__":
         fig.canvas.flush_events()
         # plt.pause(.1)
         # plt.close()
+
+        # save model every 100 games
+        if game_count % 100 == 0:
+            directory = f"data/cnn/{timestamp}"
+            os.makedirs(directory, exist_ok=True)
+            torch.save({
+                "epoch": game_count,
+                "model_state_dict": game.model.state_dict(),
+                "target_model_state_dict": game.target_model.state_dict(),
+                "optimizer_state_dict": game.optimizer.state_dict(),
+            }, f"{directory}/model_{game_count}.pth")
