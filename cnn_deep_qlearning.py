@@ -124,7 +124,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     # mini-batches are preferable to larger 1. speed 2. performs better apparently
     # also more commonly referenced in papers like https://arxiv.org/pdf/1312.5602.pdf
     batch_size = 32
-    train_start = batch_size*2
+    train_start = batch_size*8
     mem_size = 100_000
 
     learning_rate = 0.001
@@ -133,7 +133,8 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     epsilon_min = 0.0
     eps_steps = 100_000
 
-    replay_memory = deque(maxlen=mem_size)
+    # replay_memory = deque(maxlen=mem_size)
+    replay_memory = {}
 
     target_model_update = 10_000
 
@@ -216,6 +217,8 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         self.food_iterations = [0]
 
+        self.do_train = True
+
 
     def get_action(self) -> Direction:
         if self.local_count % self.action_every_n_frames != 0:
@@ -224,13 +227,13 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         state = self.get_state()
 
         # epsilon-greedy todo how does this work with model inference?
-        if random.random() < self.epsilon or global_count < self.train_start:
+        if random.random() < self.epsilon or global_count < self.train_start and self.do_train:
             action = random.randint(0, 3)
             action_direction = Direction(action)
             self.history.append(History(state, action_direction))
             return action_direction
 
-        if global_count == self.train_start:
+        if global_count == self.train_start and self.do_train:
             print("Starting training")
 
         # NN forward pass
@@ -252,6 +255,9 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         # take index of max value
         action_direction = Direction(action)
         self.history.append(History(state, action_direction))
+
+        if len(self.history) > 1000:
+            self.history.pop(0)
 
         return action_direction
 
@@ -348,15 +354,18 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         rewards.append(reward)
 
         # fix
+        if self.dimensions[0] not in self.replay_memory:
+            self.replay_memory[self.dimensions[0]] = deque(maxlen=self.mem_size)
         if not self.snake_alive:
             reward = -5
-            self.replay_memory.append(
+            self.replay_memory[self.dimensions[0]].append(
                 Experience(current.state, current.action, float(reward), current.state, not self.snake_alive))
         else:
-            self.replay_memory.append(Experience(previous.state, previous.action, float(reward), current.state, not self.snake_alive))
+            self.replay_memory[self.dimensions[0]].append(Experience(previous.state, previous.action, float(reward), current.state, not self.snake_alive))
 
-        loss = self.train()
-        losses.append(loss)
+        if self.do_train:
+            loss = self.train()
+            losses.append(loss)
 
         self.local_count += 1
         global_count += 1
@@ -372,7 +381,10 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         if global_count < self.train_start:
             return 0
 
-        batch = random.sample(self.replay_memory, self.batch_size)
+        if len(self.replay_memory[self.dimensions[0]]) < self.batch_size:
+            batch = self.replay_memory[self.dimensions[0]]
+        else:
+            batch = random.sample(self.replay_memory[self.dimensions[0]], self.batch_size)
         rewards = torch.tensor([exp.reward for exp in batch])
         states = torch.stack([exp.state.grid for exp in batch])
         actions = torch.tensor([exp.action.value for exp in batch])
@@ -422,8 +434,8 @@ if __name__ == "__main__":
     _losses = []
     _rewards_sum = []
     _rewards_mean = []
-    tails = []
-    walls = []
+    tail_deaths = []
+    wall_deaths = []
     death_reasons = []
     iterations = []
     iteration_foods = []
@@ -440,19 +452,23 @@ if __name__ == "__main__":
         f.write(f"Game,Score\n")
 
     timestamp = int(datetime.datetime.now().timestamp())
-    use_checkpoint = False
+    use_checkpoint = True
     action_every_n_frames = 1
 
     while game_count < game_count_cap:
         game = DeepQLearningSnakeGame(state_dict, True)
 
-        game.dimensions = (200, 200)
+        # randomise dimensions between 50-250, for now always square
+        dim = random.randint(5, 10) * 10 * 2
+        game.dimensions = (dim, dim)
+        print(f"Dimensions: {game.dimensions}")
+        game.dimensions = (400, 400)
         if game_count == 0:
             num_params = sum(p.numel() for p in game.model.parameters())
             print(f"Number of parameters: {num_params}, mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
 
             if use_checkpoint:
-                checkpoint = torch.load("data/cnn/1703464101/model_1200.pth", map_location=device)
+                checkpoint = torch.load("data/cnn/1703544321/model_1000.pth", map_location=device)
                 game.model.load_state_dict(checkpoint["model_state_dict"])
                 game.model.train()
                 game.target_model.load_state_dict(checkpoint["target_model_state_dict"])
@@ -461,6 +477,8 @@ if __name__ == "__main__":
 
                 print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
                 print(f"New mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
+
+                game.do_train = True
 
             game.model.to(device)
             game.target_model.to(device)
@@ -471,16 +489,15 @@ if __name__ == "__main__":
         #     game.epsilon = 0
         game.epsilon = max(game.epsilon_min, 1.0 - (game_count / 200)**2)
         if use_checkpoint:
-            game.epsilon = 0.01
+            game.epsilon = 0.0
         epsilons.append(game.epsilon)
         game.frametime = 50_000
         game.action_every_n_frames = action_every_n_frames
-        game.block_size = 10
         rewards = []
         losses = []
         game.play()
         game_count += 1
-        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}, Loss: {losses[-1]}")
+        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}, Loss: {losses[-1] if len(losses) > 0 else 0}")
         state_dict = game.model.state_dict()
 
         with open(filename, 'a') as f:
@@ -496,8 +513,8 @@ if __name__ == "__main__":
 
         if game_count % running_trend == 0:
             # proportion of deaths
-            tails.append(death_reasons.count(DeathReason.TAIL) / len(death_reasons))
-            walls.append(death_reasons.count(DeathReason.WALL) / len(death_reasons))
+            tail_deaths.append(death_reasons.count(DeathReason.TAIL) / len(death_reasons))
+            wall_deaths.append(death_reasons.count(DeathReason.WALL) / len(death_reasons))
             death_reasons = []
 
         num_almost_zero_weights = 0
@@ -518,25 +535,25 @@ if __name__ == "__main__":
         fig, axs = plt.subplots(7, figsize=(5, 10), sharex=True)
         fig.suptitle('Training...')
 
-        running_trend_x = [(1+i) * running_trend for i in range(len(tails))]
+        running_trend_x = [(1+i) * running_trend for i in range(len(tail_deaths))]
 
         axs[0].set_ylabel('Score')
         axs[0].plot(scores, 'k')
         # running_trend on score
-        scores_mean = [np.mean(scores[i*running_trend:i*running_trend + running_trend]) for i in range(len(tails))]
+        scores_mean = [np.mean(scores[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))]
         axs[0].plot(running_trend_x, scores_mean, 'r')
         axs[0].set_ylim(ymin=0)
         axs[0].text(len(scores) - 1, scores[-1], str(scores[-1]))
 
         axs[1].set_ylabel('Loss')
         axs[1].plot(_losses, 'k')
-        axs[1].set_ylim(ymin=0, ymax=2)
+        axs[1].set_ylim(ymin=0)
         axs[1].text(len(losses) - 1, losses[-1], str(losses[-1]))
 
         # axs[2].set_ylabel('Rew.S')
         # axs[2].plot(_rewards_sum, 'k')
         # # running_trend on reward sum
-        # rewards_sum_mean = [np.mean(_rewards_sum[i*running_trend:i*running_trend + running_trend]) for i in range(len(tails))]
+        # rewards_sum_mean = [np.mean(_rewards_sum[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))]
         # axs[2].plot(running_trend_x, rewards_sum_mean, 'r')
         # axs[2].set_ylim(ymin=0)
         # axs[2].text(len(rewards) - 1, rewards[-1], str(rewards[-1]))
@@ -547,8 +564,8 @@ if __name__ == "__main__":
         axs[2].text(len(rewards) - 1, rewards[-1], str(rewards[-1]))
 
         axs[3].set_ylabel('Death')
-        axs[3].plot(running_trend_x, tails, 'x', label="Tail", color="red")
-        axs[3].plot(running_trend_x, walls, 'x', label="Wall", color="blue")
+        axs[3].plot(running_trend_x, tail_deaths, 'x', label="Tail", color="red")
+        axs[3].plot(running_trend_x, wall_deaths, 'x', label="Wall", color="blue")
         axs[3].set_ylim(ymin=0, ymax=1)
         axs[3].legend(loc="upper right")
 
@@ -576,7 +593,7 @@ if __name__ == "__main__":
         # plt.close()
 
         # save model every 100 games
-        if game_count % 100 == 0:
+        if game_count % 100 == 0 and not use_checkpoint:
             directory = f"data/cnn/{timestamp}"
             os.makedirs(directory, exist_ok=True)
             torch.save({

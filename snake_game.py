@@ -15,26 +15,34 @@ class DeathReason(Enum):
 
 
 class AbstractSnakeGame:
-    def __init__(self, use_renderer):
+    def __init__(self, use_renderer, dimensions: Tuple[int, int] = (600, 400)):
         self.render = use_renderer
         self.snake_alive: bool = True
         self.snake: List[Coordinate] = []
-        self.dimensions: Tuple[int, int] = (600, 400)
+        self.dimensions: Tuple[int, int] = dimensions
         self.display: pygame.Surface = None
         self.clock: pygame.time.Clock = None
         self.food_location: Coordinate = None
-        self.block_size: int = 20
+        self.block_size: int = 10
         self.frametime: int = 10
         self.move_direction: Direction = Direction.NONE
         self.death_reason: DeathReason = DeathReason.NONE
 
     def play(self):
+        self.walls = []
+        for i in range(0, self.dimensions[0], self.block_size):
+            self.walls.append(Coordinate(i, 0))
+            self.walls.append(Coordinate(i, self.dimensions[1] - self.block_size))
+        for i in range(0, self.dimensions[1], self.block_size):
+            self.walls.append(Coordinate(0, i))
+            self.walls.append(Coordinate(self.dimensions[0] - self.block_size, i))
+
         if self.render:
             pygame.init()
             pygame.display.set_caption('Snake')
             self.clock = pygame.time.Clock()
             self.display = pygame.display.set_mode(self.dimensions)
-        self.snake.append(Coordinate(self.dimensions[0] // 2, self.dimensions[1] // 2))
+        self.snake.append(Coordinate(((self.dimensions[0] // self.block_size) // 2) * self.block_size, ((self.dimensions[1] // self.block_size) // 2) * self.block_size))
         self.food_location = self.generate_food()
 
         while self.snake_alive:
@@ -96,13 +104,13 @@ class AbstractSnakeGame:
                 break
 
         # temp check if head is out of bounds
-        if self.snake[0].x < 0 or self.snake[0].x >= self.dimensions[0] or self.snake[0].y < 0 or self.snake[0].y >= self.dimensions[1]:
+        if self.snake[0].x < self.block_size or self.snake[0].x >= self.dimensions[0]-self.block_size or self.snake[0].y < self.block_size or self.snake[0].y >= self.dimensions[1]-self.block_size:
             self.snake_alive = False
             self.death_reason = DeathReason.WALL
 
     def generate_food(self) -> Coordinate:
-        x = random.randint(0, (self.dimensions[0] - self.block_size)//self.block_size) * self.block_size
-        y = random.randint(0, (self.dimensions[1] - self.block_size)//self.block_size) * self.block_size
+        x = random.randint(1, (self.dimensions[0] - self.block_size*2)//self.block_size) * self.block_size
+        y = random.randint(1, (self.dimensions[1] - self.block_size*2)//self.block_size) * self.block_size
 
         xy = Coordinate(x, y)
         if xy in self.snake:
@@ -112,10 +120,15 @@ class AbstractSnakeGame:
 
     def draw(self):
         self.display.fill((0, 0, 0))
+        self.draw_walls()
         self.draw_snake()
         self.draw_food()
         # self.draw_score()
         pygame.display.update()
+
+    def draw_walls(self):
+        for wall in self.walls:
+            pygame.draw.rect(self.display, (50, 50, 50), (wall.x, wall.y, self.block_size, self.block_size))
 
     def draw_snake(self):
         for i, segment in enumerate(self.snake):
