@@ -12,6 +12,7 @@ class DeathReason(Enum):
     NONE = -1
     WALL = 0
     TAIL = 1
+    LOOP = 2
 
 
 class AbstractSnakeGame:

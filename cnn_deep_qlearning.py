@@ -5,8 +5,10 @@ import random
 from typing import List, Tuple
 from enum import Enum
 from collections import deque
+from copy import deepcopy
 
 import numpy as np
+from memory_profiler import profile
 
 from snake_game import AbstractSnakeGame, Coordinate, DeathReason
 from misc import Direction, Vector
@@ -14,12 +16,9 @@ from dataclasses import dataclass
 import torch, torch.nn as nn
 
 import matplotlib.pyplot as plt
-import matplotlib
 
-from IPython import display
 
 plt.ion()
-# matplotlib.use('TkAgg')
 
 
 @dataclass
@@ -60,36 +59,6 @@ class LearningType(Enum):
     FittedQLearning = 2
 
 
-class DeepQLearningLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    # def forward(self, discount_factor, reward, q1, q0):
-    #     # instead of getting q from the q_values, we get it from the model
-    #     # todo this model is wrong??, it predicts action not q - actually maybe these are the same?
-    #     loss = reward + discount_factor * q1 - q0
-    #     lsq_loss = loss ** 2
-    #     # print(f"loss: {lsq_loss}, q1 {q1}, q0 {q0}")
-    #     return lsq_loss
-
-    def forward(self, target_model, discount_factor, rewards, states, actions, next_states, dead):
-        # just MSE loss of expected q values vs actual q values, but without that explicit calculation
-        q0_actions = target_model(states)
-        batch_indices = torch.arange(len(actions))
-        q0 = q0_actions[batch_indices, actions]
-        q1 = torch.max(target_model(next_states), dim=1).values
-        # discount factor is 0 if dead
-        discount_factor_tensor = torch.full_like(dead, discount_factor, dtype=torch.float32)
-        discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
-        loss = rewards + discount_factor_tensor * q1 - q0
-        lsq_loss = loss ** 2
-
-        if any(dead):
-            # print("dead")
-            pass
-
-        return lsq_loss.mean()
-
 def weights_init(layer_in):
     if isinstance(layer_in, nn.Linear):
         nn.init.kaiming_uniform(layer_in.weight)
@@ -101,23 +70,7 @@ rewards = []
 
 
 class DeepQLearningSnakeGame(AbstractSnakeGame):
-    # define neural net (https://github.com/blakeMilner/DeepQLearning/blob/master/deepqlearn.lua)
-    # states and actions that go into the neural net (state0,action0),(state1,action1), ... , (stateN)
-    # this variable controls the size of the temporal window
-
-    # Number of past state/action pairs input to the network. 0 = agent lives in-the-moment :)
-    sqs = [''.join(s) for s in list(itertools.product(*[['0', '1', '2']] * 4))]
-    widths = ['0', '1', '4']
-    heights = ['2', '3', '4']
-
-    num_states = len(sqs) * len(widths) * len(heights)
-
-    num_states = 6  # 4 for surroundings, 2 for food position
     num_actions = 4
-    temporal_window = 2
-    # net_inputs = (num_states + num_actions) * temporal_window + num_states
-    net_inputs = num_states * temporal_window
-    num_inputs = num_states
     hidden_nodes_1 = 256
     hidden_nodes_2 = hidden_nodes_1
 
@@ -166,7 +119,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     print(f"linear input size: {linear_input_size}")
 
     features = 256
-    target_model = nn.Sequential(
+    model = nn.Sequential(
         nn.Conv2d(num_channels, out_channels_1, kernel_size=kernel_1, stride=stride_1, padding=padding),
         nn.ReLU(),
         nn.Conv2d(out_channels_1, out_channels_2, kernel_size=kernel_2, stride=stride_2, padding=padding),
@@ -179,17 +132,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
     )
     # target_model.compile()
 
-    model = nn.Sequential(
-        nn.Conv2d(num_channels, out_channels_1, kernel_size=kernel_1, stride=stride_1, padding=padding),
-        nn.ReLU(),
-        nn.Conv2d(out_channels_1, out_channels_2, kernel_size=kernel_2, stride=stride_2, padding=padding),
-        nn.ReLU(),
-        nn.AdaptiveMaxPool2d(6),
-        nn.Flatten(),
-        nn.Linear(32*6*6, features),
-        nn.ReLU(),
-        nn.Linear(features, num_actions)
-    )
+    target_model = deepcopy(model)
     # model.compile()
 
     # He initialization of weights
@@ -219,6 +162,12 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         self.do_train = True
 
+        self.grid_since_last_food = []
+
+    def play(self):
+        self.grid_since_last_food = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size))
+        self.loop_count = 0
+        super().play()
 
     def get_action(self) -> Direction:
         if self.local_count % self.action_every_n_frames != 0:
@@ -249,6 +198,8 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         # concat prev state and current state
         # state_tensor_all = torch.cat((prev_state_tensor, state_tensor))
         state_tensor = state_tensor.unsqueeze(0)
+
+        # on-policy if self.model, off-policy if self.test_model
         action_tensor = self.model(state_tensor)
         action = action_tensor.argmax().item()
 
@@ -330,7 +281,6 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
             return
 
 
-
         current = self.history[-1]  # current state
         previous = self.history[-2]  # previous state
 
@@ -338,18 +288,30 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         if current.state.food_position != previous.state.food_position:  # Snake ate a food, positive reward
             reward = 3
             self.food_iterations.append(self.local_count - self.food_iterations[-1])
+            self.grid_since_last_food = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size))
         elif abs(current.state.distance_to_food.x) < abs(previous.state.distance_to_food.x) or abs(current.state.distance_to_food.y) < abs(previous.state.distance_to_food.y):  # Snake is closer to the food, positive reward
             reward = 1
         # if snake next to tail, negative reward
         else:
             reward = -1  # Snake is further from the food, negative reward
 
-        # discourage going back to where you came from to avoid oscillation
-        if len(self.history) > 2:
-            sm1 = self.history[-3].state  # state before previous state
-            if sm1.grid.tolist() == current.state.grid.tolist():
-                reward += -2
+        # snake can get caught in loop and never learn about the negative reward for that, so kill if we detect
+        # maybe add noise to the Q-values on inference?
+        # better idea is store the grid positions of the snake and if it ever repeats, give it a negative reward
+        # this will alter the path it will take next, which will help to avoid loops
 
+        detect_loops = True
+        if detect_loops:
+            snake_head = self.snake[0]
+            if self.grid_since_last_food[snake_head.x // self.block_size, snake_head.y // self.block_size] == 1:
+                # reward = -1
+                self.loop_count += 1
+
+                if not self.do_train and self.loop_count > 10:# and self.epsilon < 0.1:
+                    self.snake_alive = False
+                    self.death_reason = DeathReason.LOOP
+
+            self.grid_since_last_food[snake_head.x // self.block_size, snake_head.y // self.block_size] = 1
 
         rewards.append(reward)
 
@@ -372,7 +334,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         if global_count % self.target_model_update == 0:
             self.target_model.load_state_dict(self.model.state_dict())
-            self.target_model.eval()
+            print("Updated target model")
 
         if global_count % 5_000 == 0:
             print(f"Global count: {global_count}")
@@ -393,39 +355,37 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         next_states = torch.stack([exp.next_state.grid for exp in batch])
         dead = torch.tensor([exp.dead for exp in batch])
 
-        predicted = self.model(states)
 
-        q0_actions = self.target_model(states)
         batch_indices = torch.arange(len(actions))
-        q1 = torch.max(self.target_model(next_states), dim=1).values
 
         discount_factor_tensor = torch.full_like(dead, self.discount_factor, dtype=torch.float32)
         discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
 
-        target = predicted.clone()
+        predicted = self.model(states)
+        y = predicted.clone()
 
         # update each action with the expected q value, leave the rest the same as did not change
-        target[batch_indices, actions] = rewards + discount_factor_tensor * q1
+        # DDQN https://arxiv.org/pdf/1509.06461.pdf
+        # use online model to pick action (y), use target model to evaluate q value (q)
+        q = torch.max(self.target_model(next_states), dim=1).values
+        y[batch_indices, actions] = rewards + discount_factor_tensor * q
+
+        self.model.train()
 
         self.optimizer.zero_grad()
-        loss = self.criterion(predicted, target)
+        loss = self.criterion(predicted, y)
         loss_float = loss.item()
         loss.backward()
         self.optimizer.step()
 
-        return loss_float
+        self.model.eval()
 
-    def get_onehot(self, actions):
-        """ Create list of vectors with 1 values at index of action in list """
-        actions_onehot = np.zeros((self.batch_size, 4))
-        for i in range(len(actions)):
-            actions_onehot[i][int(actions[i])] = 1
-        return actions_onehot
+        return loss_float
 
 
 if __name__ == "__main__":
     game_count = 0
-    game_count_cap = 20000
+    game_count_cap = 300
     epsilon_trigger = 0
     desc = f"fromzero_e{epsilon_trigger}"
     filename = f"qlearning_{desc}_{int(datetime.datetime.now().timestamp())}_{game_count_cap}.txt"
@@ -436,6 +396,7 @@ if __name__ == "__main__":
     _rewards_mean = []
     tail_deaths = []
     wall_deaths = []
+    loop_deaths = []
     death_reasons = []
     iterations = []
     iteration_foods = []
@@ -452,7 +413,8 @@ if __name__ == "__main__":
         f.write(f"Game,Score\n")
 
     timestamp = int(datetime.datetime.now().timestamp())
-    use_checkpoint = True
+    use_checkpoint = False
+    checkpoint_file = "data/cnn/1703621993/model_1000.pth"
     action_every_n_frames = 1
 
     while game_count < game_count_cap:
@@ -462,27 +424,30 @@ if __name__ == "__main__":
         dim = random.randint(5, 10) * 10 * 2
         game.dimensions = (dim, dim)
         print(f"Dimensions: {game.dimensions}")
-        game.dimensions = (400, 400)
+        game.dimensions = (110, 110)
         if game_count == 0:
             num_params = sum(p.numel() for p in game.model.parameters())
             print(f"Number of parameters: {num_params}, mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
 
             if use_checkpoint:
-                checkpoint = torch.load("data/cnn/1703544321/model_1000.pth", map_location=device)
+                checkpoint = torch.load(checkpoint_file, map_location=device)
                 game.model.load_state_dict(checkpoint["model_state_dict"])
-                game.model.train()
                 game.target_model.load_state_dict(checkpoint["target_model_state_dict"])
-                game.target_model.eval()
                 game.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
                 print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
                 print(f"New mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
 
-                game.do_train = True
-
             game.model.to(device)
             game.target_model.to(device)
 
+            game.model.eval()
+            game.target_model.eval()
+
+        if use_checkpoint:
+            # todo figure out why setting this to False causes the game to stop working
+            # my guess is that something in the model is not initialized properly
+            game.do_train = False
         # if game_count % 100 == 0 and game_count > 90:
         #     game.epsilon *= 0.5
         # if game_count > epsilon_trigger:
@@ -491,13 +456,15 @@ if __name__ == "__main__":
         if use_checkpoint:
             game.epsilon = 0.0
         epsilons.append(game.epsilon)
-        game.frametime = 50_000
+        game.frametime = 50
         game.action_every_n_frames = action_every_n_frames
         rewards = []
         losses = []
         game.play()
+        if not losses:
+            losses.append(0)
         game_count += 1
-        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}, Loss: {losses[-1] if len(losses) > 0 else 0}")
+        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}, Loss: {losses[-1]}")
         state_dict = game.model.state_dict()
 
         with open(filename, 'a') as f:
@@ -515,6 +482,7 @@ if __name__ == "__main__":
             # proportion of deaths
             tail_deaths.append(death_reasons.count(DeathReason.TAIL) / len(death_reasons))
             wall_deaths.append(death_reasons.count(DeathReason.WALL) / len(death_reasons))
+            loop_deaths.append(death_reasons.count(DeathReason.LOOP) / len(death_reasons))
             death_reasons = []
 
         num_almost_zero_weights = 0
@@ -523,7 +491,7 @@ if __name__ == "__main__":
             num_almost_zero_weights += torch.sum(torch.abs(param) < threshold).item()
 
         sparsity = num_almost_zero_weights / sum(p.numel() for p in game.model.parameters())
-        print(f"Sparsity: {sparsity}")
+        # print(f"Sparsity: {sparsity}")
 
 
         # display.clear_output(wait=True)
@@ -533,7 +501,11 @@ if __name__ == "__main__":
         plt.clf()
 
         fig, axs = plt.subplots(7, figsize=(5, 10), sharex=True)
-        fig.suptitle('Training...')
+        fig.subplots_adjust(top=0.95)
+        if use_checkpoint:
+            fig.suptitle(f"Inference on {checkpoint_file}")
+        else:
+            fig.suptitle(f'Train {timestamp}: LR={game.learning_rate}, EPS_MIN={game.epsilon_min}, DIMS={game.dimensions[0]}x{game.dimensions[1]}')
 
         running_trend_x = [(1+i) * running_trend for i in range(len(tail_deaths))]
 
@@ -542,6 +514,8 @@ if __name__ == "__main__":
         # running_trend on score
         scores_mean = [np.mean(scores[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))]
         axs[0].plot(running_trend_x, scores_mean, 'r')
+        # 1 std dev
+        axs[0].fill_between(running_trend_x, [scores_mean[i] - np.std(scores[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))], [scores_mean[i] + np.std(scores[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))], alpha=0.3, color="red")
         axs[0].set_ylim(ymin=0)
         axs[0].text(len(scores) - 1, scores[-1], str(scores[-1]))
 
@@ -566,8 +540,9 @@ if __name__ == "__main__":
         axs[3].set_ylabel('Death')
         axs[3].plot(running_trend_x, tail_deaths, 'x', label="Tail", color="red")
         axs[3].plot(running_trend_x, wall_deaths, 'x', label="Wall", color="blue")
+        axs[3].plot(running_trend_x, loop_deaths, 'x', label="Loop", color="green")
         axs[3].set_ylim(ymin=0, ymax=1)
-        axs[3].legend(loc="upper right")
+        axs[3].legend(loc="upper left")
 
         axs[4].set_ylabel('Eps')
         axs[4].plot(epsilons, 'k')
