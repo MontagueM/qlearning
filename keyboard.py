@@ -1,4 +1,3 @@
-from typing import override
 
 from misc import Direction
 from snake_game import AbstractSnakeGame
@@ -7,10 +6,9 @@ import pygame
 
 class KeyboardSnakeGame(AbstractSnakeGame):
     def __init__(self):
-        super().__init__()
+        super().__init__(use_renderer=True)
         self.frametime = 10
 
-    @override
     def get_action(self) -> Direction:
         keys = pygame.key.get_pressed()
         if keys[pygame.K_UP]:
