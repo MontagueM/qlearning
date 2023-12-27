@@ -30,13 +30,7 @@ class AbstractSnakeGame:
         self.death_reason: DeathReason = DeathReason.NONE
 
     def play(self):
-        self.walls = []
-        for i in range(0, self.dimensions[0], self.block_size):
-            self.walls.append(Coordinate(i, 0))
-            self.walls.append(Coordinate(i, self.dimensions[1] - self.block_size))
-        for i in range(0, self.dimensions[1], self.block_size):
-            self.walls.append(Coordinate(0, i))
-            self.walls.append(Coordinate(self.dimensions[0] - self.block_size, i))
+        self.make_walls()
 
         if self.render:
             pygame.init()
@@ -52,6 +46,15 @@ class AbstractSnakeGame:
             if self.render:
                 self.draw()
                 self.clock.tick(self.frametime)
+
+    def make_walls(self):
+        self.walls = []
+        for i in range(0, self.dimensions[0], self.block_size):
+            self.walls.append(Coordinate(i, 0))
+            self.walls.append(Coordinate(i, self.dimensions[1] - self.block_size))
+        for i in range(0, self.dimensions[1], self.block_size):
+            self.walls.append(Coordinate(0, i))
+            self.walls.append(Coordinate(self.dimensions[0] - self.block_size, i))
 
     def handle_events(self):
         if self.render:

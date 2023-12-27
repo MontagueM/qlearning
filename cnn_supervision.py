@@ -7,6 +7,7 @@ from enum import Enum
 from collections import deque
 from copy import deepcopy
 
+import pygame
 import numpy as np
 from memory_profiler import profile
 
@@ -388,20 +389,30 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 @dataclass
 class RecordHistory:
     state: np.ndarray
+    snake: List[Coordinate]
+    food_location: Coordinate
     action: Direction
     eaten_food: bool
     died: bool
+
 
 class RecordSnakeGame(KeyboardSnakeGame):
     def __init__(self):
         super().__init__()
 
         self.history: List[RecordHistory] = []
+        self.score_indices: List[int] = []
 
     def update(self):
         super().update()
 
-        self.history.append(RecordHistory(self.get_state(), self.get_action(), self.food_eaten(), not self.snake_alive))
+        if self.move_direction == Direction.NONE:
+            return
+
+        self.history.append(RecordHistory(deepcopy(self.get_state()), deepcopy(self.snake), deepcopy(self.food_location), self.get_action(), self.food_eaten(), not self.snake_alive))
+
+        if self.food_eaten():
+            self.score_indices.append(len(self.history))
 
     def get_state(self) -> np.ndarray:
         # convert stateful info into 2d grid with 3 channels
@@ -415,6 +426,38 @@ class RecordSnakeGame(KeyboardSnakeGame):
             grid[body_part.x // self.block_size, body_part.y // self.block_size, :] = 1
 
         return grid
+
+
+class PlaybackSnakeGame(AbstractSnakeGame):
+    def __init__(self, history: List[RecordHistory]):
+        super().__init__(use_renderer=True)
+
+        self.history: List[RecordHistory] = history
+        self.iteration = 0
+
+    def get_action(self) -> Direction:
+        action = self.history[self.iteration].action
+        self.iteration += 1
+        return action
+
+    def play(self):
+        self.make_walls()
+
+        pygame.init()
+        pygame.display.set_caption('Snake')
+        self.clock = pygame.time.Clock()
+        self.display = pygame.display.set_mode(self.dimensions)
+
+        for h in self.history:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.snake_alive = False
+
+            self.snake = h.snake
+            self.food_location = h.food_location
+
+            self.draw()
+            self.clock.tick(self.frametime)
 
 
 if __name__ == "__main__":
@@ -451,9 +494,9 @@ if __name__ == "__main__":
     checkpoint_file = "data/cnn/1703621993/model_1000.pth"
     action_every_n_frames = 1
 
-    record = True
+    record = False
     if record:
-        game = KeyboardSnakeGame()
+        game = RecordSnakeGame()
         game.dimensions = (150, 150)
         game.frametime = 5
         game.play()
@@ -461,167 +504,21 @@ if __name__ == "__main__":
         # save the game
         data = {}
         data["dimensions"] = game.dimensions
-        data[]
+        data["num_iterations"] = len(game.history)
+        data["score"] = game.get_score()
+        data["history"] = game.history
+
+        directory = f"data/recorded/{timestamp}"
+        os.makedirs(directory, exist_ok=True)
+        torch.save(data, f"{directory}/game_{len(game.history)}_{game.get_score()}.pth")
         quit(0)
 
-
-    while game_count < game_count_cap:
-        game = DeepQLearningSnakeGame(state_dict, True)
-
-        # randomise dimensions between 50-250, for now always square
-        dim = random.randint(5, 10) * 10 * 2
-        game.dimensions = (dim, dim)
-        print(f"Dimensions: {game.dimensions}")
-        game.dimensions = (110, 110)
-        if game_count == 0:
-            num_params = sum(p.numel() for p in game.model.parameters())
-            print(f"Number of parameters: {num_params}, mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
-
-            if use_checkpoint:
-                checkpoint = torch.load(checkpoint_file, map_location=device)
-                game.model.load_state_dict(checkpoint["model_state_dict"])
-                game.target_model.load_state_dict(checkpoint["target_model_state_dict"])
-                game.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-                print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
-                print(f"New mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
-
-            game.model.to(device)
-            game.target_model.to(device)
-
-            game.model.eval()
-            game.target_model.eval()
-
-        if use_checkpoint:
-            # todo figure out why setting this to False causes the game to stop working
-            # my guess is that something in the model is not initialized properly
-            game.do_train = False
-        # if game_count % 100 == 0 and game_count > 90:
-        #     game.epsilon *= 0.5
-        # if game_count > epsilon_trigger:
-        #     game.epsilon = 0
-        game.epsilon = max(game.epsilon_min, 1.0 - (game_count / 200)**2)
-        if use_checkpoint:
-            game.epsilon = 0.0
-        epsilons.append(game.epsilon)
-        game.frametime = 50
-        game.action_every_n_frames = action_every_n_frames
-        rewards = []
-        losses = []
+    use_recorded = True
+    recorded_path = "data/recorded/1703718032/game_41_2.pth"
+    if use_recorded:
+        data = torch.load(recorded_path)
+        game = PlaybackSnakeGame(data["history"])
+        game.dimensions = data["dimensions"]
+        game.frametime = 5
         game.play()
-        if not losses:
-            losses.append(0)
-        game_count += 1
-        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}, Loss: {losses[-1]}")
-        state_dict = game.model.state_dict()
-
-        with open(filename, 'a') as f:
-            f.write(f"{game_count},{game.get_score()},{game.death_reason}\n")
-
-        scores.append(game.get_score())
-        _losses.append(np.mean(losses))
-        _rewards_sum.append(np.sum(rewards))
-        _rewards_mean.append(np.mean(rewards))
-        death_reasons.append(game.death_reason)
-        iterations.append(game.local_count / game.get_score() if game.get_score() != 0 else game.local_count)
-        iteration_foods.append(np.mean(game.food_iterations))
-
-        if game_count % running_trend == 0:
-            # proportion of deaths
-            tail_deaths.append(death_reasons.count(DeathReason.TAIL) / len(death_reasons))
-            wall_deaths.append(death_reasons.count(DeathReason.WALL) / len(death_reasons))
-            loop_deaths.append(death_reasons.count(DeathReason.LOOP) / len(death_reasons))
-            death_reasons = []
-
-        num_almost_zero_weights = 0
-        threshold = 1e-3
-        for name, param in game.model.named_parameters():
-            num_almost_zero_weights += torch.sum(torch.abs(param) < threshold).item()
-
-        sparsity = num_almost_zero_weights / sum(p.numel() for p in game.model.parameters())
-        # print(f"Sparsity: {sparsity}")
-
-
-        # display.clear_output(wait=True)
-        # display.display(plt.gcf())
-        plt.close('all')
-
-        plt.clf()
-
-        fig, axs = plt.subplots(7, figsize=(5, 10), sharex=True)
-        fig.subplots_adjust(top=0.95)
-        if use_checkpoint:
-            fig.suptitle(f"Inference on {checkpoint_file}")
-        else:
-            fig.suptitle(f'Train {timestamp}: LR={game.learning_rate}, EPS_MIN={game.epsilon_min}, DIMS={game.dimensions[0]}x{game.dimensions[1]}')
-
-        running_trend_x = [(1+i) * running_trend for i in range(len(tail_deaths))]
-
-        axs[0].set_ylabel('Score')
-        axs[0].plot(scores, 'k')
-        # running_trend on score
-        scores_mean = [np.mean(scores[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))]
-        axs[0].plot(running_trend_x, scores_mean, 'r')
-        # 1 std dev
-        axs[0].fill_between(running_trend_x, [scores_mean[i] - np.std(scores[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))], [scores_mean[i] + np.std(scores[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))], alpha=0.3, color="red")
-        axs[0].set_ylim(ymin=0)
-        axs[0].text(len(scores) - 1, scores[-1], str(scores[-1]))
-
-        axs[1].set_ylabel('Loss')
-        axs[1].plot(_losses, 'k')
-        axs[1].set_ylim(ymin=0)
-        axs[1].text(len(losses) - 1, losses[-1], str(losses[-1]))
-
-        # axs[2].set_ylabel('Rew.S')
-        # axs[2].plot(_rewards_sum, 'k')
-        # # running_trend on reward sum
-        # rewards_sum_mean = [np.mean(_rewards_sum[i*running_trend:i*running_trend + running_trend]) for i in range(len(tail_deaths))]
-        # axs[2].plot(running_trend_x, rewards_sum_mean, 'r')
-        # axs[2].set_ylim(ymin=0)
-        # axs[2].text(len(rewards) - 1, rewards[-1], str(rewards[-1]))
-
-        axs[2].set_ylabel('Rew.M')
-        axs[2].plot(_rewards_mean, 'k')
-        axs[2].set_ylim(ymin=0)
-        axs[2].text(len(rewards) - 1, rewards[-1], str(rewards[-1]))
-
-        axs[3].set_ylabel('Death')
-        axs[3].plot(running_trend_x, tail_deaths, 'x', label="Tail", color="red")
-        axs[3].plot(running_trend_x, wall_deaths, 'x', label="Wall", color="blue")
-        axs[3].plot(running_trend_x, loop_deaths, 'x', label="Loop", color="green")
-        axs[3].set_ylim(ymin=0, ymax=1)
-        axs[3].legend(loc="upper left")
-
-        axs[4].set_ylabel('Eps')
-        axs[4].plot(epsilons, 'k')
-        axs[4].set_ylim(ymin=0, ymax=1)
-        axs[4].text(len(epsilons) - 1, epsilons[-1], str(epsilons[-1]))
-
-        axs[5].set_ylabel('Its. T')
-        axs[5].plot(iterations, 'k')
-        axs[5].set_ylim(ymin=0)
-        axs[5].text(len(iterations) - 1, iterations[-1], str(iterations[-1]))
-
-        axs[6].set_ylabel('Its. M')
-        axs[6].plot(iteration_foods, 'k')
-        axs[6].set_ylim(ymin=0)
-        axs[6].text(len(iteration_foods) - 1, iteration_foods[-1], str(iteration_foods[-1]))
-
-        axs[6].set_xlabel('Number of Games')
-
-
-        fig.canvas.draw()
-        fig.canvas.flush_events()
-        # plt.pause(.1)
-        # plt.close()
-
-        # save model every 100 games
-        if game_count % 100 == 0 and not use_checkpoint:
-            directory = f"data/cnn/{timestamp}"
-            os.makedirs(directory, exist_ok=True)
-            torch.save({
-                "epoch": game_count,
-                "model_state_dict": game.model.state_dict(),
-                "target_model_state_dict": game.target_model.state_dict(),
-                "optimizer_state_dict": game.optimizer.state_dict(),
-            }, f"{directory}/model_{game_count}.pth")
+        quit(0)
