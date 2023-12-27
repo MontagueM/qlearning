@@ -213,17 +213,19 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         return action_direction
 
     def get_state(self) -> State:
-        # convert stateful info into 2d grid with 3 channels
+        # convert stateful info into 2d grid with 1 channel, its 3 but combine for efficiency
         grid = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size, 3))
-        # food is green
+        # food is green (0.5)
         grid[self.food_location.x // self.block_size, self.food_location.y // self.block_size, 1] = 1
-        # snake head is red
+        # snake head is red (0.25)
         grid[self.snake[0].x // self.block_size, self.snake[0].y // self.block_size, 0] = 1
-        # snake body is white
+        # snake body is white (1)
         for body_part in self.snake[1:]:
             grid[body_part.x // self.block_size, body_part.y // self.block_size, :] = 1
+        # add walls
+        for wall in self.walls:
+            grid[wall.x // self.block_size, wall.y // self.block_size, :] = 0.5
 
-        # todo interesting question of if we need to include the wall or not? wonder how it affects perf
 
         snake_head = self.snake[0]
         distance_to_food = self.food_location - snake_head
@@ -307,7 +309,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
                 # reward = -1
                 self.loop_count += 1
 
-                if not self.do_train and self.loop_count > 10:# and self.epsilon < 0.1:
+                if not self.do_train and self.loop_count > 100:# and self.epsilon < 0.1:
                     self.snake_alive = False
                     self.death_reason = DeathReason.LOOP
 
@@ -385,7 +387,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
 if __name__ == "__main__":
     game_count = 0
-    game_count_cap = 300
+    game_count_cap = 20_000
     epsilon_trigger = 0
     desc = f"fromzero_e{epsilon_trigger}"
     filename = f"qlearning_{desc}_{int(datetime.datetime.now().timestamp())}_{game_count_cap}.txt"
@@ -413,8 +415,8 @@ if __name__ == "__main__":
         f.write(f"Game,Score\n")
 
     timestamp = int(datetime.datetime.now().timestamp())
-    use_checkpoint = False
-    checkpoint_file = "data/cnn/1703621993/model_1000.pth"
+    use_checkpoint = True
+    checkpoint_file = "data/cnn/1703695105/model_1700.pth"
     action_every_n_frames = 1
 
     while game_count < game_count_cap:
@@ -424,7 +426,7 @@ if __name__ == "__main__":
         dim = random.randint(5, 10) * 10 * 2
         game.dimensions = (dim, dim)
         print(f"Dimensions: {game.dimensions}")
-        game.dimensions = (110, 110)
+        game.dimensions = (500, 500)
         if game_count == 0:
             num_params = sum(p.numel() for p in game.model.parameters())
             print(f"Number of parameters: {num_params}, mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
@@ -456,7 +458,9 @@ if __name__ == "__main__":
         if use_checkpoint:
             game.epsilon = 0.0
         epsilons.append(game.epsilon)
-        game.frametime = 50
+        game.frametime = 50_000
+        if use_checkpoint:
+            game.frametime = 50
         game.action_every_n_frames = action_every_n_frames
         rewards = []
         losses = []
