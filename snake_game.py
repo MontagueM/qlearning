@@ -125,8 +125,8 @@ class AbstractSnakeGame:
     def draw(self):
         self.display.fill((0, 0, 0))
         self.draw_walls()
-        self.draw_snake()
         self.draw_food()
+        self.draw_snake()
         # self.draw_score()
         pygame.display.update()
 

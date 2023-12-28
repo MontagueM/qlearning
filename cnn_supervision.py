@@ -45,7 +45,7 @@ class Experience:
     action: Direction
     reward: float
     next_state: State
-    dead: bool
+    final_step: bool
 
 
 @dataclass
@@ -356,13 +356,13 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         # one-hot encode actions as all action values are equally valuable, e.g. 3 is not better than 2
         # actions_onehot = self.get_onehot(actions)
         next_states = torch.stack([exp.next_state.grid for exp in batch])
-        dead = torch.tensor([exp.dead for exp in batch])
+        final_steps = torch.tensor([exp.final_step for exp in batch])
 
 
         batch_indices = torch.arange(len(actions))
 
-        discount_factor_tensor = torch.full_like(dead, self.discount_factor, dtype=torch.float32)
-        discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
+        discount_factor_tensor = torch.full_like(final_steps, self.discount_factor, dtype=torch.float32)
+        discount_factor_tensor = torch.where(final_steps, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
 
         predicted = self.model(states)
         y = predicted.clone()
@@ -401,7 +401,6 @@ class RecordSnakeGame(KeyboardSnakeGame):
         super().__init__()
 
         self.history: List[RecordHistory] = []
-        self.score_indices: List[int] = []
 
     def update(self):
         super().update()
@@ -409,10 +408,8 @@ class RecordSnakeGame(KeyboardSnakeGame):
         if self.move_direction == Direction.NONE:
             return
 
-        self.history.append(RecordHistory(deepcopy(self.get_state()), deepcopy(self.snake), deepcopy(self.food_location), self.get_action(), self.food_eaten(), not self.snake_alive))
-
-        if self.food_eaten():
-            self.score_indices.append(len(self.history))
+        food_eaten = self.food_location != self.history[-1].food_location if self.history else False
+        self.history.append(RecordHistory(deepcopy(self.get_state()), deepcopy(self.snake), deepcopy(self.food_location), self.get_action(), food_eaten, not self.snake_alive))
 
     def get_state(self) -> np.ndarray:
         # convert stateful info into 2d grid with 3 channels
@@ -428,17 +425,95 @@ class RecordSnakeGame(KeyboardSnakeGame):
         return grid
 
 
+@dataclass
+class Span:
+    start: int
+    end: int = lambda self: self.start + self.size
+    size: int = lambda self: self.end - self.start
+
+
 class PlaybackSnakeGame(AbstractSnakeGame):
     def __init__(self, history: List[RecordHistory]):
         super().__init__(use_renderer=True)
 
-        self.history: List[RecordHistory] = history
-        self.iteration = 0
+        self.human_history: List[RecordHistory] = history
+        self.history: List[History] = []
 
-    def get_action(self) -> Direction:
-        action = self.history[self.iteration].action
-        self.iteration += 1
-        return action
+        num_actions = 4
+        hidden_nodes_1 = 256
+        hidden_nodes_2 = hidden_nodes_1
+
+        # mini-batches are preferable to larger 1. speed 2. performs better apparently
+        # also more commonly referenced in papers like https://arxiv.org/pdf/1312.5602.pdf
+        self.batch_size = 32
+        train_start = self.batch_size * 8
+        mem_size = 100_000
+
+        learning_rate = 0.001
+        self.discount_factor = 0.95
+        self.epsilon = 0.1
+        epsilon_min = 0.0
+        eps_steps = 100_000
+
+        # replay_memory = deque(maxlen=mem_size)
+        replay_memory = {}
+
+        target_model_update = 10_000
+
+        num_frames = 4
+        num_channels = 3
+
+        kernel_1 = 3
+        kernel_2 = 3
+        stride_1 = 1
+        stride_2 = 1
+        padding = 0
+        out_channels_1 = 16
+        out_channels_2 = 32
+        input_width = 10
+        input_height = 10
+        max_pool_kernel = 1
+        conv1_output_width = (input_width - kernel_2 + 2 * padding) // stride_1 + 1
+        conv1_output_height = (input_height - kernel_1 + 2 * padding) // stride_1 + 1
+        max_pool_stride = 1
+        dilation = 1
+        maxpool1_output_width = (conv1_output_width + 2 * padding - dilation * (
+                    max_pool_kernel - 1) - 1) // max_pool_stride + 1
+        maxpool1_output_height = (conv1_output_height + 2 * padding - dilation * (
+                    max_pool_kernel - 1) - 1) // max_pool_stride + 1
+        conv2_output_width = (maxpool1_output_width - kernel_2 + 2 * padding) // stride_2 + 1
+        conv2_output_height = (maxpool1_output_height - kernel_2 + 2 * padding) // stride_2 + 1
+        maxpool2_output_width = (conv2_output_width + 2 * padding - dilation * (
+                    max_pool_kernel - 1) - 1) // max_pool_stride + 1
+        maxpool2_output_height = (conv2_output_height + 2 * padding - dilation * (
+                    max_pool_kernel - 1) - 1) // max_pool_stride + 1
+        # linear_input_size = maxpool2_output_width * maxpool2_output_height * out_channels_2
+        linear_input_size = 1152
+        print(f"linear input size: {linear_input_size}")
+
+        features = 256
+        self.model = nn.Sequential(
+            nn.Conv2d(num_channels, out_channels_1, kernel_size=kernel_1, stride=stride_1, padding=padding),
+            nn.ReLU(),
+            nn.Conv2d(out_channels_1, out_channels_2, kernel_size=kernel_2, stride=stride_2, padding=padding),
+            nn.ReLU(),
+            nn.AdaptiveMaxPool2d(6),
+            nn.Flatten(),
+            nn.Linear(32 * 6 * 6, features),
+            nn.ReLU(),
+            nn.Linear(features, num_actions)
+        )
+
+        self.model.apply(weights_init)
+
+        # set loss function
+        # criterion = DeepQLearningLoss()
+        self.criterion = nn.MSELoss()
+
+        # set optimizer
+        self.optimizer = torch.optim.RMSprop(self.model.parameters(), lr=learning_rate)
+
+        self.replay_memory = deque(maxlen=mem_size)
 
     def play(self):
         self.make_walls()
@@ -448,16 +523,239 @@ class PlaybackSnakeGame(AbstractSnakeGame):
         self.clock = pygame.time.Clock()
         self.display = pygame.display.set_mode(self.dimensions)
 
-        for h in self.history:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.snake_alive = False
+        # split history up based on when food was eaten
+        split_history = [[]]
+        for h in self.human_history:
+            split_history[-1].append(h)
+            if h.eaten_food:
+                split_history.append([])
 
-            self.snake = h.snake
-            self.food_location = h.food_location
+        for h in split_history[:-1][::-1]:  # skip last one as it is death, todo consider doing this but as a negative reward?
+            self.playback(h)
+            quit(2)
 
-            self.draw()
-            self.clock.tick(self.frametime)
+    def get_action(self) -> Direction:
+        state = self.get_state()
+
+        if random.random() < self.epsilon:
+            action = random.randint(0, 3)
+            action_direction = Direction(action)
+            self.history.append(History(state, action_direction))
+            return action_direction
+
+        state_tensor = state.grid
+        state_tensor = state_tensor.unsqueeze(0)
+
+        action_tensor = self.model(state_tensor)
+        action = action_tensor.argmax().item()
+
+        # take index of max value
+        action_direction = Direction(action)
+        self.history.append(History(state, action_direction))
+
+        return action_direction
+
+    def get_state(self) -> State:
+        # convert stateful info into 2d grid with 3 channels
+        grid = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size, 3))
+        # food is green
+        grid[self.food_location.x // self.block_size, self.food_location.y // self.block_size, 1] = 1
+        # snake head is red
+        grid[self.snake[0].x // self.block_size, self.snake[0].y // self.block_size, 0] = 1
+        # snake body is white
+        for body_part in self.snake[1:]:
+            grid[body_part.x // self.block_size, body_part.y // self.block_size, :] = 1
+        # add walls
+        for wall in self.walls:
+            grid[wall.x // self.block_size, wall.y // self.block_size, :] = 0.5
+
+        snake_head = self.snake[0]
+        distance_to_food = self.food_location - snake_head
+
+        if distance_to_food.x > 0:
+            pos_x = '1'  # Food is to the right of the snake
+        elif distance_to_food.x < 0:
+            pos_x = '0'  # Food is to the left of the snake
+        else:
+            pos_x = '4'  # Food and snake are on the same X file
+
+        if distance_to_food.y > 0:
+            pos_y = '3'  # Food is below snake
+        elif distance_to_food.y < 0:
+            pos_y = '2'  # Food is above snake
+        else:
+            pos_y = '4'  # Food and snake are on the same Y file
+
+        sqs = [
+            Coordinate(snake_head.x - self.block_size, snake_head.y),
+            Coordinate(snake_head.x + self.block_size, snake_head.y),
+            Coordinate(snake_head.x, snake_head.y - self.block_size),
+            Coordinate(snake_head.x, snake_head.y + self.block_size),
+        ]
+
+        surrounding_list = []
+        for sq in sqs:
+            if sq.x < 0 or sq.y < 0:  # off-screen left or top
+                surrounding_list.append('1')
+            elif sq.x >= self.dimensions[0] or sq.y >= self.dimensions[1]:  # off-screen right or bottom
+                surrounding_list.append('1')
+            elif sq in self.snake[1:-1]:  # part of tail
+                surrounding_list.append('2')
+            else:
+                surrounding_list.append('0')
+        surroundings = ''.join(surrounding_list)
+
+        # permute to fit BATCH x CHANNELS x HEIGHT x WIDTH
+        grid = torch.tensor(grid, dtype=torch.float32).permute(2, 0, 1)
+        return State(distance_to_food, (pos_x, pos_y), surroundings, self.food_location, grid)
+
+    def playback(self, history: List[RecordHistory]):
+        """
+        history is a list of recorded human game history,
+        starting when reward was spawned and ending when reward was acquired.
+        this func iterates over this history backwards, letting the model learn.
+        """
+
+        current_back_index = len(history) - 2
+        max_repeats = 5000
+
+        while current_back_index >= 0:
+            h = history[current_back_index]
+
+            reach_reward_success: int = 0
+            repeats: int = 0
+            success_ratio: float = 0.75
+            repeat_min = 10
+
+
+            epsilon_start = 1.0
+            epsilon_min = 0.01
+            epsilon_len = 50
+
+            repeat_min = epsilon_len
+
+            has_success = lambda: repeats > repeat_min and reach_reward_success / repeats > success_ratio
+
+
+            while repeats < max_repeats and not has_success():
+                self.epsilon = max(epsilon_min, epsilon_start * (1 - repeats / epsilon_len))
+                print(f"Repeats: {repeats}, Success ratio: {reach_reward_success / repeats if repeats > 0 else 0}, Epsilon: {self.epsilon}")
+                self.snake_alive = True
+                its = 0
+                self.snake = deepcopy(h.snake)
+                self.food_location = h.food_location
+
+
+                self.draw()
+                self.clock.tick(self.frametime)
+
+                while self.snake_alive:
+                    self.handle_events()
+                    self.check_collision()
+                    # todo consider case of rewarding any of the same position instead
+                    # of just the action similarity
+                    human_action = None
+                    if current_back_index + its < len(history):
+                        human_action = history[current_back_index + its].action
+                        # print(f"HUMAN ACTION: {human_action} vs MACHINE ACTION: {self.history[-1].action}")
+                    self.update_model(human_action)
+
+                    self.draw()
+                    self.clock.tick(self.frametime)
+
+                    if self.food_eaten():
+                        reach_reward_success += 1
+                        break
+
+                    its += 1
+
+                repeats += 1
+
+            current_back_index -= 1
+
+
+            if repeats >= max_repeats:
+                print("Max repeats reached")
+                break
+
+            if has_success():
+                print("Success")
+                pass
+
+        pass
+
+    def update_model(self, human_action):
+        if len(self.history) < 2:
+            return
+
+        current = self.history[-1]
+        previous = self.history[-2]
+
+        # todo consider impact of not using prev != current logic
+        if self.food_eaten():
+            reward = 10
+        elif abs(current.state.distance_to_food.x) < abs(previous.state.distance_to_food.x) or abs(current.state.distance_to_food.y) < abs(previous.state.distance_to_food.y):
+            reward = 1
+        else:
+            reward = -1
+
+        # if the move is identical to the human, reward stronger
+        if human_action == current.action:
+            reward += 4
+
+        if not self.snake_alive:
+            reward = -5
+
+        if not self.snake_alive or self.food_eaten():
+            self.replay_memory.append(
+                Experience(current.state, current.action, float(reward), current.state, True))
+        else:
+            self.replay_memory.append(Experience(previous.state, previous.action, float(reward), current.state, False))
+
+
+        loss = self.train()
+        print(f"Loss: {loss}")
+
+    def train(self) -> float:
+        if len(self.replay_memory) < self.batch_size:
+            batch = self.replay_memory
+        else:
+            batch = random.sample(self.replay_memory, self.batch_size)
+        rewards = torch.tensor([exp.reward for exp in batch])
+        states = torch.stack([exp.state.grid for exp in batch])
+        actions = torch.tensor([exp.action.value for exp in batch])
+        # one-hot encode actions as all action values are equally valuable, e.g. 3 is not better than 2
+        # actions_onehot = self.get_onehot(actions)
+        next_states = torch.stack([exp.next_state.grid for exp in batch])
+        final_steps = torch.tensor([exp.final_step for exp in batch])
+
+
+        batch_indices = torch.arange(len(actions))
+
+        discount_factor_tensor = torch.full_like(final_steps, self.discount_factor, dtype=torch.float32)
+        discount_factor_tensor = torch.where(final_steps, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
+
+        predicted = self.model(states)
+        y = predicted.clone()
+
+        # update each action with the expected q value, leave the rest the same as did not change
+        # DDQN https://arxiv.org/pdf/1509.06461.pdf
+        # use online model to pick action (y), use target model to evaluate q value (q)
+        q = torch.max(self.model(next_states), dim=1).values
+        y[batch_indices, actions] = rewards + discount_factor_tensor * q
+
+        self.model.train()
+
+        self.optimizer.zero_grad()
+        loss = self.criterion(predicted, y)
+        loss_float = loss.item()
+        loss.backward()
+        self.optimizer.step()
+
+        self.model.eval()
+
+        return loss_float
+
 
 
 if __name__ == "__main__":
@@ -514,11 +812,11 @@ if __name__ == "__main__":
         quit(0)
 
     use_recorded = True
-    recorded_path = "data/recorded/1703718032/game_41_2.pth"
+    recorded_path = "data/recorded/1703748853/game_28_3.pth"
     if use_recorded:
         data = torch.load(recorded_path)
         game = PlaybackSnakeGame(data["history"])
         game.dimensions = data["dimensions"]
-        game.frametime = 5
+        game.frametime = 50_000
         game.play()
         quit(0)
