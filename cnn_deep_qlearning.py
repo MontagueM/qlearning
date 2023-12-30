@@ -65,8 +65,6 @@ def weights_init(layer_in):
         layer_in.bias.data.fill_(0.0)
 
 global_count = 0
-losses = []
-rewards = []
 
 
 class DeepQLearningSnakeGame(AbstractSnakeGame):
@@ -76,8 +74,8 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
     # mini-batches are preferable to larger 1. speed 2. performs better apparently
     # also more commonly referenced in papers like https://arxiv.org/pdf/1312.5602.pdf
-    batch_size = 32
-    train_start = batch_size*8
+    batch_size = 256
+    train_start = batch_size
     mem_size = 100_000
 
     learning_rate = 0.001
@@ -163,6 +161,9 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         self.do_train = True
 
         self.grid_since_last_food = []
+
+        self.losses = []
+        self.rewards = []
 
     def play(self):
         self.grid_since_last_food = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size))
@@ -315,7 +316,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
             self.grid_since_last_food[snake_head.x // self.block_size, snake_head.y // self.block_size] = 1
 
-        rewards.append(reward)
+        self.rewards.append(reward)
 
         # fix
         if self.dimensions[0] not in self.replay_memory:
@@ -329,7 +330,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
 
         if self.do_train:
             loss = self.train()
-            losses.append(loss)
+            self.losses.append(loss)
 
         self.local_count += 1
         global_count += 1
@@ -349,7 +350,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
             batch = self.replay_memory[self.dimensions[0]]
         else:
             batch = random.sample(self.replay_memory[self.dimensions[0]], self.batch_size)
-        rewards = torch.tensor([exp.reward for exp in batch])
+        trewards = torch.tensor([exp.reward for exp in batch])
         states = torch.stack([exp.state.grid for exp in batch])
         actions = torch.tensor([exp.action.value for exp in batch])
         # one-hot encode actions as all action values are equally valuable, e.g. 3 is not better than 2
@@ -370,7 +371,7 @@ class DeepQLearningSnakeGame(AbstractSnakeGame):
         # DDQN https://arxiv.org/pdf/1509.06461.pdf
         # use online model to pick action (y), use target model to evaluate q value (q)
         q = torch.max(self.target_model(next_states), dim=1).values
-        y[batch_indices, actions] = rewards + discount_factor_tensor * q
+        y[batch_indices, actions] = trewards + discount_factor_tensor * q
 
         self.model.train()
 
@@ -406,16 +407,18 @@ if __name__ == "__main__":
     epsilons = []
 
     # mps seems to be better at large batch sizes e.g. 1024-2048
-    # torch.set_default_device("mps")
-    # device = torch.device("mps")
-    torch.set_default_device("cpu")
-    device = torch.device("cpu")
+    dev_name = "cpu"
+    dev_name = "mps"
+    torch.set_default_device("mps")
+    device = torch.device("mps")
+    # torch.set_default_device("cpu")
+    # device = torch.device("cpu")
 
-    with open(filename, 'w') as f:
-        f.write(f"Game,Score\n")
+    # with open(filename, 'w') as f:
+    #     f.write(f"Game,Score\n")
 
     timestamp = int(datetime.datetime.now().timestamp())
-    use_checkpoint = True
+    use_checkpoint = False
     checkpoint_file = "data/cnn/1703695105/model_1700.pth"
     action_every_n_frames = 1
 
@@ -426,7 +429,7 @@ if __name__ == "__main__":
         dim = random.randint(5, 10) * 10 * 2
         game.dimensions = (dim, dim)
         print(f"Dimensions: {game.dimensions}")
-        game.dimensions = (500, 500)
+        game.dimensions = (100, 100)
         if game_count == 0:
             num_params = sum(p.numel() for p in game.model.parameters())
             print(f"Number of parameters: {num_params}, mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
@@ -462,17 +465,17 @@ if __name__ == "__main__":
         if use_checkpoint:
             game.frametime = 50
         game.action_every_n_frames = action_every_n_frames
-        rewards = []
-        losses = []
         game.play()
+        losses = game.losses
+        rewards = game.rewards
         if not losses:
             losses.append(0)
         game_count += 1
         print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}, Loss: {losses[-1]}")
         state_dict = game.model.state_dict()
 
-        with open(filename, 'a') as f:
-            f.write(f"{game_count},{game.get_score()},{game.death_reason}\n")
+        # with open(filename, 'a') as f:
+        #     f.write(f"{game_count},{game.get_score()},{game.death_reason}\n")
 
         scores.append(game.get_score())
         _losses.append(np.mean(losses))
@@ -509,7 +512,7 @@ if __name__ == "__main__":
         if use_checkpoint:
             fig.suptitle(f"Inference on {checkpoint_file}")
         else:
-            fig.suptitle(f'Train {timestamp}: LR={game.learning_rate}, EPS_MIN={game.epsilon_min}, DIMS={game.dimensions[0]}x{game.dimensions[1]}')
+            fig.suptitle(f'Train {timestamp}: LR={game.learning_rate}, BS={game.batch_size} DIMS={game.dimensions[0]}x{game.dimensions[1]}')
 
         running_trend_x = [(1+i) * running_trend for i in range(len(tail_deaths))]
 
