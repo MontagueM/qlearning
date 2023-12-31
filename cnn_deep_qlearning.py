@@ -102,7 +102,7 @@ class DDQNAgent(nn.Module, Agent):
 
         self.epsilon = 1.0
         self.epsilon_min = 0.0
-        self.epsilon_length = 200
+        self.epsilon_cutoff = 200
         self.memory_size = 100_000
         self.experience_memory: deque[Experience] = deque(maxlen=self.memory_size)
 
@@ -123,7 +123,7 @@ class DDQNAgent(nn.Module, Agent):
         self.loop_count = 0
 
     def start_episode(self, episode_num, game):
-        self.epsilon = max(self.epsilon_min, 1.0 - episode_num / self.epsilon_length)
+        self.epsilon = max(self.epsilon_min, 1.0 - episode_num / self.epsilon_cutoff)
         self.epsilons.append(self.epsilon)
         self.current_game_steps = 0
         self.grid_since_last_food = np.zeros((game.dimensions[0] // game.block_size, game.dimensions[1] // game.block_size))

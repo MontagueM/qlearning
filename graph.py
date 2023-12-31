@@ -2,22 +2,47 @@ import matplotlib.pyplot as plt
 import os
 import numpy as np
 
-color_iter = iter(['red', 'blue', 'green', 'orange', 'purple', 'black'])
+color_iter = iter(['red', 'blue', 'green', 'orange', 'purple', 'black', 'pink', 'brown', 'grey', 'cyan', 'magenta', 'lime', 'teal', 'lavender', 'tan', 'salmon', 'gold', 'lightcoral', 'darkkhaki', 'darkseagreen', 'darkslategray', 'darkolivegreen', 'darkslateblue', 'darkmagenta', 'darkred', 'darkorange', 'darkgreen', 'darkblue', 'darkcyan', 'darkviolet', 'darkgray', 'lightpink', 'lightsalmon', 'khaki', 'palegreen', 'lightsteelblue', 'thistle', 'lightgrey', 'violet', 'lightgoldenrodyellow', 'mediumorchid', 'slateblue', 'mediumvioletred', 'mediumturquoise', 'mediumspringgreen', 'mediumslateblue', 'mediumseagreen', 'mediumaquamarine', 'mediumblue', 'mediumslat'])
 
 
-def plot_gamescores(all_scores):
+def plot_gamescores(all_scores, all_times):
     end_cutoff = 1
+
+    fig, axs = plt.subplots(2, figsize=(6, 10), sharex=False)
+    fig.subplots_adjust(top=0.95)
+
+    diff_colour = {}
+
     for differentiator, game_scores in all_scores.items():
+        colour = next(color_iter)
+        diff_colour[differentiator] = colour
         x = list(game_scores.keys())[:-end_cutoff]
         y = [sum(scores)/len(scores) for scores in game_scores.values()][:-end_cutoff]
-        colour = next(color_iter)
-        plt.plot(x, y, 'x', color=colour, label=differentiator)
-        plt.legend()
+        axs[0].plot(x, y, 'x', color=colour, label=differentiator)
+        # fill between 1 std dev
+        # axs[0].fill_between(x,
+        #                     [y[i] - np.std(scores) for i, scores in enumerate(list(game_scores.values())[:-end_cutoff])],
+        #                     [y[i] + np.std(scores) for i, scores in enumerate(list(game_scores.values())[:-end_cutoff])], alpha=0.3, color=colour)
+        # error bars, only the top/bottom bars
+        axs[0].errorbar(x, y, yerr=[np.std(scores) for scores in list(game_scores.values())[:-end_cutoff]], fmt='none', ecolor=colour, capsize=3, elinewidth=0)
 
-        # plt.fill_between
-        plt.xlabel("Game")
-        plt.ylabel("Score")
-        plt.title("Score over time")
+    axs[0].legend()
+
+    # plt.fill_between
+    axs[0].set_xlabel("Game")
+    axs[0].set_ylabel("Score")
+    axs[0].set_title("Score over time")
+
+    # plot time instead
+    ax1 = axs[1]
+    for differentiator, game_scores in all_scores.items():
+        x = [int(all_times[differentiator][int(i)-1]) if i > 0 else 0 for i in game_scores.keys()][:-end_cutoff]
+        y = [sum(scores)/len(scores) for scores in game_scores.values()][:-end_cutoff]
+        ax1.plot(x, y, 'x', color=diff_colour[differentiator], label=differentiator)
+
+    ax1.set_ylabel("Score")
+    ax1.set_xlabel("Time")
+
     # save 4k res
     plt.savefig(f'{top_folder}/plot_score.png', dpi=400)
     plt.show()
@@ -111,14 +136,16 @@ if __name__ == '__main__':
     # top_folder = 'data/epsilon_cutoff/1703003251'
     # top_folder = 'data/policy_type/1703035101'
     # top_folder = 'data/new_distance_measurement/1703091383'
-    top_folder = "data/batches/1703962658"  # first batch test
-    top_folder = "data/batches/1703974013"
+    # top_folder = "data/batches/1704054346"  # 3 minute time limit
+    # top_folder = "data/batches/1704055473"  # 1000 game limit
+    top_folder = "data/batches/1704059217"  # only 32 and 64 for 2k games
     game_variants = {}
 
     all_scores = {}
     all_deaths = {}
     all_losses = {}
     all_rewards = {}
+    all_times = {}
     for folder in os.listdir(top_folder):
         if os.path.isfile(f'{top_folder}/{folder}'):
             continue
@@ -127,6 +154,7 @@ if __name__ == '__main__':
         all_deaths[cutoff] = {}
         all_losses[cutoff] = {}
         all_rewards[cutoff] = {}
+        all_times[cutoff] = []
         # each are re-runs for a mean calculation
         for file in os.listdir(f'{top_folder}/{folder}'):
             filename = f'{top_folder}/{folder}/{file}'
@@ -137,13 +165,13 @@ if __name__ == '__main__':
 
 
             for line in lines[1:]:
-                game, score, death_reason, loss, reward = line.split(',')
+                game, score, death_reason, loss, reward, time = line.split(',')
 
                 game = int(game)
                 score = int(score)
 
                 # bin scores into x
-                bin_size = 50
+                bin_size = len(lines) // 20
 
                 new_game = (game // bin_size) * bin_size
                 if new_game not in all_scores[cutoff]:
@@ -155,8 +183,9 @@ if __name__ == '__main__':
                 all_deaths[cutoff][new_game].append(death_reason.strip().split(".")[-1])
                 all_losses[cutoff][new_game].append(float(loss))
                 all_rewards[cutoff][new_game].append(float(reward))
+                all_times[cutoff].append(float(time))
 
 
-    plot_gamescores(all_scores)
+    plot_gamescores(all_scores, all_times)
     # plot_deaths(all_deaths)
     # plot_all(all_scores, all_deaths, all_losses, all_rewards)

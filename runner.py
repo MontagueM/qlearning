@@ -27,47 +27,44 @@ class Hyperparameters:
 
 
 def run_game(hyperparameters, run_id=0, save_folder="data/", renderer=True, time_allowed=0):
-    dump_cache = False
     os.makedirs(save_folder, exist_ok=True)
 
     game_count = 0
     desc = f"bs{hyperparameters.batch_size}_ec{hyperparameters.epsilon_cutoff}_gc{hyperparameters.game_cutoff}_lr{hyperparameters.learning_rate}_df{hyperparameters.discount_factor}"
     filename = f"{save_folder}/cnn_{desc}_{run_id}_{int(datetime.datetime.now().timestamp())}.txt"
     with open(filename, 'w') as f:
-        f.write(f"Game,Score\n")
+        f.write(f"Game,Score,DeathReason,LossMean,RewardMean,TimeS\n")
 
     start_time = time.time()
-    while game_count < hyperparameters.game_cutoff:
-        game = DeepQLearningSnakeGame(None, renderer)
-        # if game_count % 100 == 0 and game_count > 90:
-        #     game.epsilon *= 0.5
-        game.learning_rate = hyperparameters.learning_rate
-        game.discount_factor = hyperparameters.discount_factor
-        game.learning_type = hyperparameters.learning_type
-        game.batch_size = hyperparameters.batch_size
-        game.dimensions = hyperparameters.dimensions
-        game.model.to(hyperparameters.device)
-        game.target_model.to(hyperparameters.device)
+    agent = DDQNAgent(hyperparameters.device, 4)
+    agent.epsilon_cutoff = hyperparameters.epsilon_cutoff
+    agent.epsilon_min = hyperparameters.epsilon_min
+    agent.learning_rate = hyperparameters.learning_rate
+    agent.discount_factor = hyperparameters.discount_factor
+    agent.batch_size = hyperparameters.batch_size
 
-        if hyperparameters.epsilon_cutoff > 0:
-            game.epsilon = max(hyperparameters.epsilon_min, 1.0 - (game_count / hyperparameters.epsilon_cutoff))
-        else:
-            game.epsilon = hyperparameters.epsilon_min
+    while game_count < hyperparameters.game_cutoff:
+        game = DeepQLearningSnakeGame(agent, renderer)
+
+        game.dimensions = hyperparameters.dimensions
+
+        agent.start_episode(game_count, game)
 
         game.frametime = 50_000
         game.block_size = 10
         game.play()
         game_count += 1
-        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}")
 
-        losses = game.losses
-        rewards = game.rewards
+        game_data = agent.get_game_data(game)
+
+        print(f"Games: {game_count}, Score: {game_data.score}, Epsilon: {agent.epsilon}")
+
 
         if time_allowed > 0 and time.time() - start_time > time_allowed:
             break
 
         with open(filename, 'a') as f:
-            f.write(f"{game_count},{game.get_score()},{game.death_reason},{np.mean(losses)},{np.mean(rewards)}\n")
+            f.write(f"{game_count},{game_data.score},{game.death_reason},{np.mean(game_data.losses)},{np.mean(game_data.rewards)},{time.time()-start_time}\n")
 
 
 def test_epsilons():
@@ -105,14 +102,15 @@ def pure_test(desc):
 
 def test_batches():
     batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256]
-    batch_sizes = batch_sizes[::-1]
     # batch_sizes = [2, 4]
-    batch_sizes = [2, 4, 8, 16, 32]
-    game_cutoff = 1_000
+    batch_sizes = [32, 64]
+    batch_sizes = batch_sizes[::-1]
+    game_cutoff = 2_000
     dimensions = (100, 100)
     reruns = 1
     time = int(datetime.datetime.now().timestamp())
-    time_allowed = 60 * 3
+    # time_allowed = 60 * 3
+    time_allowed = 0
     for batch_size in batch_sizes:
         if batch_size >= 64:
             device = "mps"
