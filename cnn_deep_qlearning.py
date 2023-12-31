@@ -7,10 +7,11 @@ from enum import Enum
 from collections import deque
 from copy import deepcopy
 
+import abc
 import numpy as np
 from memory_profiler import profile
 
-from snake_game import AbstractSnakeGame, Coordinate, DeathReason
+from snake_game import AbstractSnakeGame, Coordinate, DeathReason, Agent
 from misc import Direction, Vector
 from dataclasses import dataclass
 import torch, torch.nn as nn
@@ -31,20 +32,16 @@ class QState:
 
 @dataclass
 class State:
-    distance_to_food: Vector
-    relative_food_direction: tuple
-    surroundings: str
     food_position: Coordinate  # only used to know if snake ate food
+    distance_to_food: Vector  # used for reward
     grid: torch.Tensor
+    died: bool = False
 
 @dataclass
 class Experience:
     state: State
     action: Direction
-    reward: float
-    next_state: State
-    dead: bool
-
+    reward: float = 0.0
 
 @dataclass
 class History:
@@ -66,332 +63,439 @@ def weights_init(layer_in):
 
 global_count = 0
 
+@dataclass
+class GameData:
+    epsilons: List[float]
+    rewards: List[float]
+    losses: List[float]
+    score: int
 
-class DeepQLearningSnakeGame(AbstractSnakeGame):
-    num_actions = 4
-    hidden_nodes_1 = 256
-    hidden_nodes_2 = hidden_nodes_1
 
-    # mini-batches are preferable to larger 1. speed 2. performs better apparently
-    # also more commonly referenced in papers like https://arxiv.org/pdf/1312.5602.pdf
-    batch_size = 256
-    train_start = batch_size
-    mem_size = 100_000
+class DDQNAgent(nn.Module, Agent):
+    def __init__(self, device, num_actions):
+        super(DDQNAgent, self).__init__()
+        self.device = device
+        self.num_actions = num_actions
 
-    learning_rate = 0.001
-    discount_factor = 0.95
-    epsilon = 1.0
-    epsilon_min = 0.0
-    eps_steps = 100_000
+        self.model = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.AdaptiveMaxPool2d(6),
+            nn.Flatten(),
+            nn.Linear(32*6*6, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_actions)
+        )
+        self.model.to(self.device)
+        self.model.apply(weights_init)
 
-    # replay_memory = deque(maxlen=mem_size)
-    replay_memory = {}
+        self.target_model = deepcopy(self.model)
+        self.target_model_update = 10_000
 
-    target_model_update = 10_000
+        self.learning_rate = 0.001
+        self.discount_factor = 0.95
+        self.optimizer = torch.optim.RMSprop(self.parameters(), lr=self.learning_rate)
+        self.loss_fn = nn.MSELoss()
 
-    num_frames = 4
-    num_channels = 3
+        self.epsilon = 1.0
+        self.epsilon_min = 0.0
+        self.epsilon_length = 200
+        self.memory_size = 100_000
+        self.experience_memory: deque[Experience] = deque(maxlen=self.memory_size)
 
-    kernel_1 = 3
-    kernel_2 = 3
-    stride_1 = 1
-    stride_2 = 1
-    padding = 0
-    out_channels_1 = 16
-    out_channels_2 = 32
-    input_width = 10
-    input_height = 10
-    max_pool_kernel = 1
-    conv1_output_width = (input_width - kernel_2 + 2 * padding) // stride_1 + 1
-    conv1_output_height = (input_height - kernel_1 + 2 * padding) // stride_1 + 1
-    max_pool_stride = 1
-    dilation = 1
-    maxpool1_output_width = (conv1_output_width + 2 * padding - dilation * (max_pool_kernel - 1) - 1) // max_pool_stride + 1
-    maxpool1_output_height = (conv1_output_height + 2 * padding - dilation * (max_pool_kernel - 1) - 1) // max_pool_stride + 1
-    conv2_output_width = (maxpool1_output_width - kernel_2 + 2 * padding) // stride_2 + 1
-    conv2_output_height = (maxpool1_output_height - kernel_2 + 2 * padding) // stride_2 + 1
-    maxpool2_output_width = (conv2_output_width + 2 * padding - dilation * (max_pool_kernel - 1) - 1) // max_pool_stride + 1
-    maxpool2_output_height = (conv2_output_height + 2 * padding - dilation * (max_pool_kernel - 1) - 1) // max_pool_stride + 1
-    # linear_input_size = maxpool2_output_width * maxpool2_output_height * out_channels_2
-    linear_input_size = 1152
-    print(f"linear input size: {linear_input_size}")
+        self.batch_size = 32
 
-    features = 256
-    model = nn.Sequential(
-        nn.Conv2d(num_channels, out_channels_1, kernel_size=kernel_1, stride=stride_1, padding=padding),
-        nn.ReLU(),
-        nn.Conv2d(out_channels_1, out_channels_2, kernel_size=kernel_2, stride=stride_2, padding=padding),
-        nn.ReLU(),
-        nn.AdaptiveMaxPool2d(6),
-        nn.Flatten(),
-        nn.Linear(32*6*6, features),
-        nn.ReLU(),
-        nn.Linear(features, num_actions)
-    )
-    # target_model.compile()
-
-    target_model = deepcopy(model)
-    # model.compile()
-
-    # He initialization of weights
-
-    target_model.apply(weights_init)
-    model.apply(weights_init)
-
-    # set loss function
-    # criterion = DeepQLearningLoss()
-    criterion = nn.MSELoss()
-
-    # set optimizer
-    optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
-
-    def __init__(self, state_dict=None, use_renderer=True):
-        super().__init__(use_renderer)
-        self.frametime = 50
-
-        self.history: List[History] = []
-
-        self.learning_type = LearningType.QLearningOffPolicy
-
-        self.local_count = 0
-        self.action_every_n_frames = 1
-
-        self.food_iterations = [0]
-
-        self.do_train = True
-
-        self.grid_since_last_food = []
+        self.training_start = 1_000
 
         self.losses = []
         self.rewards = []
+        self.game_end_indices = []
+        self.epsilons = []
 
-    def play(self):
-        self.grid_since_last_food = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size))
+        self.do_train = True
+
+        self.current_game_steps = 0
+        self.grid_since_last_food = None
         self.loop_count = 0
-        super().play()
 
-    def get_action(self) -> Direction:
-        if self.local_count % self.action_every_n_frames != 0:
-            return Direction.NONE
+    def start_episode(self, episode_num, game):
+        self.epsilon = max(self.epsilon_min, 1.0 - episode_num / self.epsilon_length)
+        self.epsilons.append(self.epsilon)
+        self.current_game_steps = 0
+        self.grid_since_last_food = np.zeros((game.dimensions[0] // game.block_size, game.dimensions[1] // game.block_size))
+        print(f"starting episode {episode_num}, epsilon: {self.epsilon}")
 
-        state = self.get_state()
+    def act(self, game: AbstractSnakeGame) -> None:
+        state = self.get_state(game)
+        action = self.get_action(state)
 
-        # epsilon-greedy todo how does this work with model inference?
-        if random.random() < self.epsilon or global_count < self.train_start and self.do_train:
-            action = random.randint(0, 3)
-            action_direction = Direction(action)
-            self.history.append(History(state, action_direction))
-            return action_direction
+        self.experience_memory.append(Experience(state, action))
 
-        if global_count == self.train_start and self.do_train:
-            print("Starting training")
+        game.move_direction = action
+        game.move_snake()
+        game.update()
 
-        # NN forward pass
-        # state to tensor
-        state_tensor = state.grid
+        self.current_game_steps += 1
 
-        # prev_state_tensor = self.history[-1].state.tensor()
-        # if prev_state is not None:
-        #
-        # else:
-        #     state_tensor_prev = torch.zeros_like(state_tensor)
+        # todo figure out a nice way to handle this case
+        # i imagine an issue where the first states poison the memory
+        if len(self.experience_memory) < 2:
+            return
 
-        # concat prev state and current state
-        # state_tensor_all = torch.cat((prev_state_tensor, state_tensor))
-        state_tensor = state_tensor.unsqueeze(0)
+        if len(self.experience_memory) % self.target_model_update == 0:
+            self.target_model.load_state_dict(self.model.state_dict())
+            print("Updated target model")
 
-        # on-policy if self.model, off-policy if self.test_model
-        action_tensor = self.model(state_tensor)
-        action = action_tensor.argmax().item()
+        reward = self.get_reward(game)
+        self.rewards.append(reward)
 
-        # take index of max value
-        action_direction = Direction(action)
-        self.history.append(History(state, action_direction))
+        died = not game.snake_alive
+        if died:
+            self.game_end_indices.append(len(self.experience_memory)-1)
 
-        if len(self.history) > 1000:
-            self.history.pop(0)
+        self.experience_memory[-1].reward = reward if not died else -5
+        self.experience_memory[-1].state.died = died
 
-        return action_direction
+        if len(self.experience_memory) >= self.training_start and self.do_train:
+            loss = self.train()
+            self.losses.append(loss)
 
-    def get_state(self) -> State:
+
+    def get_action(self, state: State) -> Direction:
+        # return randrange(self.num_actions)
+        if random.random() < self.epsilon or len(self.experience_memory) < self.training_start and self.do_train:
+            action = random.randrange(self.num_actions)
+        else:
+            action = self.model(state.grid.unsqueeze(0)).argmax().item()
+
+        action = Direction(action)
+
+        return action
+
+    def get_state(self, game: AbstractSnakeGame) -> State:
+        distance_to_food = game.food_location - game.snake[0]
+        return State(game.food_location, distance_to_food, self.get_grid(game))
+
+    def get_grid(self, game: AbstractSnakeGame) -> torch.Tensor:
         # convert stateful info into 2d grid with 1 channel, its 3 but combine for efficiency
-        grid = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size, 3))
+        grid = np.zeros((game.dimensions[0] // game.block_size, game.dimensions[1] // game.block_size, 3))
         # food is green (0.5)
-        grid[self.food_location.x // self.block_size, self.food_location.y // self.block_size, 1] = 1
+        grid[game.food_location.x // game.block_size, game.food_location.y // game.block_size, 1] = 1
         # snake head is red (0.25)
-        grid[self.snake[0].x // self.block_size, self.snake[0].y // self.block_size, 0] = 1
+        grid[game.snake[0].x // game.block_size, game.snake[0].y // game.block_size, 0] = 1
         # snake body is white (1)
-        for body_part in self.snake[1:]:
-            grid[body_part.x // self.block_size, body_part.y // self.block_size, :] = 1
+        for body_part in game.snake[1:]:
+            grid[body_part.x // game.block_size, body_part.y // game.block_size, :] = 1
         # add walls
-        for wall in self.walls:
-            grid[wall.x // self.block_size, wall.y // self.block_size, :] = 0.5
-
-
-        snake_head = self.snake[0]
-        distance_to_food = self.food_location - snake_head
-
-        if distance_to_food.x > 0:
-            pos_x = '1'  # Food is to the right of the snake
-        elif distance_to_food.x < 0:
-            pos_x = '0'  # Food is to the left of the snake
-        else:
-            pos_x = '4'  # Food and snake are on the same X file
-
-        if distance_to_food.y > 0:
-            pos_y = '3'  # Food is below snake
-        elif distance_to_food.y < 0:
-            pos_y = '2'  # Food is above snake
-        else:
-            pos_y = '4'  # Food and snake are on the same Y file
-
-        sqs = [
-            Coordinate(snake_head.x - self.block_size, snake_head.y),
-            Coordinate(snake_head.x + self.block_size, snake_head.y),
-            Coordinate(snake_head.x, snake_head.y - self.block_size),
-            Coordinate(snake_head.x, snake_head.y + self.block_size),
-        ]
-
-        surrounding_list = []
-        for sq in sqs:
-            if sq.x < 0 or sq.y < 0:  # off-screen left or top
-                surrounding_list.append('1')
-            elif sq.x >= self.dimensions[0] or sq.y >= self.dimensions[1]:  # off-screen right or bottom
-                surrounding_list.append('1')
-            elif sq in self.snake[1:-1]:  # part of tail
-                surrounding_list.append('2')
-            else:
-                surrounding_list.append('0')
-        surroundings = ''.join(surrounding_list)
+        for wall in game.walls:
+            grid[wall.x // game.block_size, wall.y // game.block_size, :] = 0.5
 
         # permute to fit BATCH x CHANNELS x HEIGHT x WIDTH
         grid = torch.tensor(grid, dtype=torch.float32).permute(2, 0, 1)
-        return State(distance_to_food, (pos_x, pos_y), surroundings, self.food_location, grid)
+        return grid
 
-    def update(self):
-        super().update()
-
-        self.update_qvalues()
-
-        # if self.get_score() > 30:
-        #     self.frametime = 20
-
-    def update_qvalues(self):
-        global global_count
-        if len(self.history) < 2:
-            self.local_count += 1
-            global_count += 1
-            return
-
-
-        current = self.history[-1]  # current state
-        previous = self.history[-2]  # previous state
+    def get_reward(self, game: AbstractSnakeGame) -> float:
+        current = self.experience_memory[-1]
+        previous = self.experience_memory[-2]
 
         # reward is defined as acquired AFTER the action is taken (SARSA), so this is previous-state reward
-        if current.state.food_position != previous.state.food_position:  # Snake ate a food, positive reward
-            reward = 3
-            self.food_iterations.append(self.local_count - self.food_iterations[-1])
-            self.grid_since_last_food = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size))
-        elif abs(current.state.distance_to_food.x) < abs(previous.state.distance_to_food.x) or abs(current.state.distance_to_food.y) < abs(previous.state.distance_to_food.y):  # Snake is closer to the food, positive reward
-            reward = 1
-        # if snake next to tail, negative reward
-        else:
-            reward = -1  # Snake is further from the food, negative reward
 
-        # snake can get caught in loop and never learn about the negative reward for that, so kill if we detect
-        # maybe add noise to the Q-values on inference?
-        # better idea is store the grid positions of the snake and if it ever repeats, give it a negative reward
-        # this will alter the path it will take next, which will help to avoid loops
+        if current.state.food_position != previous.state.food_position:
+            reward = 3
+            self.grid_since_last_food = np.zeros((game.dimensions[0] // game.block_size, game.dimensions[1] // game.block_size))
+        elif abs(current.state.distance_to_food.x) < abs(previous.state.distance_to_food.x) or abs(current.state.distance_to_food.y) < abs(previous.state.distance_to_food.y):
+            reward = 1
+        else:
+            reward = -1
 
         detect_loops = True
         if detect_loops:
-            snake_head = self.snake[0]
-            if self.grid_since_last_food[snake_head.x // self.block_size, snake_head.y // self.block_size] == 1:
+            snake_head = game.snake[0]
+            if self.grid_since_last_food[snake_head.x // game.block_size, snake_head.y // game.block_size] == 1:
                 # reward = -1
                 self.loop_count += 1
 
                 if not self.do_train and self.loop_count > 100:# and self.epsilon < 0.1:
-                    self.snake_alive = False
-                    self.death_reason = DeathReason.LOOP
+                    game.snake_alive = False
+                    game.death_reason = DeathReason.LOOP
 
-            self.grid_since_last_food[snake_head.x // self.block_size, snake_head.y // self.block_size] = 1
+            self.grid_since_last_food[snake_head.x // game.block_size, snake_head.y // game.block_size] = 1
 
-        self.rewards.append(reward)
 
-        # fix
-        if self.dimensions[0] not in self.replay_memory:
-            self.replay_memory[self.dimensions[0]] = deque(maxlen=self.mem_size)
-        if not self.snake_alive:
-            reward = -5
-            self.replay_memory[self.dimensions[0]].append(
-                Experience(current.state, current.action, float(reward), current.state, not self.snake_alive))
-        else:
-            self.replay_memory[self.dimensions[0]].append(Experience(previous.state, previous.action, float(reward), current.state, not self.snake_alive))
-
-        if self.do_train:
-            loss = self.train()
-            self.losses.append(loss)
-
-        self.local_count += 1
-        global_count += 1
-
-        if global_count % self.target_model_update == 0:
-            self.target_model.load_state_dict(self.model.state_dict())
-            print("Updated target model")
-
-        if global_count % 5_000 == 0:
-            print(f"Global count: {global_count}")
+        return reward
 
     def train(self) -> float:
-        if global_count < self.train_start:
-            return 0
+        # -1 because we need the next state, -1 because the next state should have a reward(?)
 
-        if len(self.replay_memory[self.dimensions[0]]) < self.batch_size:
-            batch = self.replay_memory[self.dimensions[0]]
+        if len(self.experience_memory)-2 < self.batch_size:
+            batch_indices = range(len(self.experience_memory)-2)
         else:
-            batch = random.sample(self.replay_memory[self.dimensions[0]], self.batch_size)
-        trewards = torch.tensor([exp.reward for exp in batch])
-        states = torch.stack([exp.state.grid for exp in batch])
-        actions = torch.tensor([exp.action.value for exp in batch])
-        # one-hot encode actions as all action values are equally valuable, e.g. 3 is not better than 2
-        # actions_onehot = self.get_onehot(actions)
-        next_states = torch.stack([exp.next_state.grid for exp in batch])
-        dead = torch.tensor([exp.dead for exp in batch])
+            batch_indices = random.sample(range(len(self.experience_memory)-2), self.batch_size)
 
+        batch = [self.experience_memory[i] for i in batch_indices]
 
-        batch_indices = torch.arange(len(actions))
+        states = torch.stack([self.experience_memory[i].state.grid for i in batch_indices])
+        actions = torch.tensor([experience.action.value for experience in batch])
+        rewards = torch.tensor([experience.reward for experience in batch])
+        dead = torch.tensor([exp.state.died for exp in batch])
+        # this is invalid if the last state is a dead state, but we don't actually use it due to the dead mask
+        next_states = torch.stack([self.experience_memory[i+1].state.grid for i in batch_indices])
 
-        discount_factor_tensor = torch.full_like(dead, self.discount_factor, dtype=torch.float32)
-        discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
+        # 1 if alive, 0 if dead
+        dead_mask = dead.logical_not().float()
+
+        states = states.to(self.device)
+        next_states = next_states.to(self.device)
 
         predicted = self.model(states)
         y = predicted.clone()
 
-        # update each action with the expected q value, leave the rest the same as did not change
-        # DDQN https://arxiv.org/pdf/1509.06461.pdf
-        # use online model to pick action (y), use target model to evaluate q value (q)
-        q = torch.max(self.target_model(next_states), dim=1).values
-        y[batch_indices, actions] = trewards + discount_factor_tensor * q
-
-        self.model.train()
+        q = torch.max(self.model(next_states), dim=1).values
+        r = torch.arange(len(batch))
+        y[r, actions] = rewards + self.discount_factor * q * dead_mask
 
         self.optimizer.zero_grad()
-        loss = self.criterion(predicted, y)
+        loss = self.loss_fn(predicted, y)
         loss_float = loss.item()
         loss.backward()
         self.optimizer.step()
 
-        self.model.eval()
-
         return loss_float
+
+    def get_game_data(self, game: AbstractSnakeGame) -> GameData:
+        game_epsilons = self.epsilons[-self.current_game_steps:]
+        game_rewards = self.rewards[-self.current_game_steps:]
+        game_losses = self.losses[-self.current_game_steps:]
+        game_score = game.get_score()
+        return GameData(game_epsilons, game_rewards, game_losses, game_score)
+
+
+class DeepQLearningSnakeGame(AbstractSnakeGame):
+    def __init__(self, agent: DDQNAgent, use_renderer=True):
+        super().__init__(agent, use_renderer)
+
+    def play(self):
+        super().play()
+
+    # def get_action(self) -> Direction:
+    #     state = self.get_state()
+    #
+    #     # epsilon-greedy todo how does this work with model inference?
+    #     if random.random() < self.epsilon or global_count < self.train_start and self.do_train:
+    #         action = random.randint(0, 3)
+    #         action_direction = Direction(action)
+    #         self.history.append(History(state, action_direction))
+    #         return action_direction
+    #
+    #     if global_count == self.train_start and self.do_train:
+    #         print("Starting training")
+    #
+    #     # NN forward pass
+    #     # state to tensor
+    #     state_tensor = state.grid
+    #
+    #     # prev_state_tensor = self.history[-1].state.tensor()
+    #     # if prev_state is not None:
+    #     #
+    #     # else:
+    #     #     state_tensor_prev = torch.zeros_like(state_tensor)
+    #
+    #     # concat prev state and current state
+    #     # state_tensor_all = torch.cat((prev_state_tensor, state_tensor))
+    #     state_tensor = state_tensor.unsqueeze(0)
+    #
+    #     # on-policy if self.model, off-policy if self.test_model
+    #     action_tensor = self.model(state_tensor)
+    #     action = action_tensor.argmax().item()
+    #
+    #     # take index of max value
+    #     action_direction = Direction(action)
+    #     self.history.append(History(state, action_direction))
+    #
+    #     if len(self.history) > 1000:
+    #         self.history.pop(0)
+    #
+    #     return action_direction
+
+    # def get_state(self) -> State:
+    #     # convert stateful info into 2d grid with 1 channel, its 3 but combine for efficiency
+    #     grid = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size, 3))
+    #     # food is green (0.5)
+    #     grid[self.food_location.x // self.block_size, self.food_location.y // self.block_size, 1] = 1
+    #     # snake head is red (0.25)
+    #     grid[self.snake[0].x // self.block_size, self.snake[0].y // self.block_size, 0] = 1
+    #     # snake body is white (1)
+    #     for body_part in self.snake[1:]:
+    #         grid[body_part.x // self.block_size, body_part.y // self.block_size, :] = 1
+    #     # add walls
+    #     for wall in self.walls:
+    #         grid[wall.x // self.block_size, wall.y // self.block_size, :] = 0.5
+    #
+    #
+    #     snake_head = self.snake[0]
+    #     distance_to_food = self.food_location - snake_head
+    #
+    #     if distance_to_food.x > 0:
+    #         pos_x = '1'  # Food is to the right of the snake
+    #     elif distance_to_food.x < 0:
+    #         pos_x = '0'  # Food is to the left of the snake
+    #     else:
+    #         pos_x = '4'  # Food and snake are on the same X file
+    #
+    #     if distance_to_food.y > 0:
+    #         pos_y = '3'  # Food is below snake
+    #     elif distance_to_food.y < 0:
+    #         pos_y = '2'  # Food is above snake
+    #     else:
+    #         pos_y = '4'  # Food and snake are on the same Y file
+    #
+    #     sqs = [
+    #         Coordinate(snake_head.x - self.block_size, snake_head.y),
+    #         Coordinate(snake_head.x + self.block_size, snake_head.y),
+    #         Coordinate(snake_head.x, snake_head.y - self.block_size),
+    #         Coordinate(snake_head.x, snake_head.y + self.block_size),
+    #     ]
+    #
+    #     surrounding_list = []
+    #     for sq in sqs:
+    #         if sq.x < 0 or sq.y < 0:  # off-screen left or top
+    #             surrounding_list.append('1')
+    #         elif sq.x >= self.dimensions[0] or sq.y >= self.dimensions[1]:  # off-screen right or bottom
+    #             surrounding_list.append('1')
+    #         elif sq in self.snake[1:-1]:  # part of tail
+    #             surrounding_list.append('2')
+    #         else:
+    #             surrounding_list.append('0')
+    #     surroundings = ''.join(surrounding_list)
+    #
+    #     # permute to fit BATCH x CHANNELS x HEIGHT x WIDTH
+    #     grid = torch.tensor(grid, dtype=torch.float32).permute(2, 0, 1)
+    #     return State(distance_to_food, (pos_x, pos_y), surroundings, self.food_location, grid)
+
+    def update(self):
+        super().update()
+
+        # self.update_qvalues()
+
+        # if self.get_score() > 30:
+        #     self.frametime = 20
+
+    # def update_qvalues(self):
+    #     global global_count
+    #     if len(self.history) < 2:
+    #         self.local_count += 1
+    #         global_count += 1
+    #         return
+    #
+    #
+    #     current = self.history[-1]  # current state
+    #     previous = self.history[-2]  # previous state
+    #
+    #     # reward is defined as acquired AFTER the action is taken (SARSA), so this is previous-state reward
+    #     if current.state.food_position != previous.state.food_position:  # Snake ate a food, positive reward
+    #         reward = 3
+    #         self.food_iterations.append(self.local_count - self.food_iterations[-1])
+    #         self.grid_since_last_food = np.zeros((self.dimensions[0] // self.block_size, self.dimensions[1] // self.block_size))
+    #     elif abs(current.state.distance_to_food.x) < abs(previous.state.distance_to_food.x) or abs(current.state.distance_to_food.y) < abs(previous.state.distance_to_food.y):  # Snake is closer to the food, positive reward
+    #         reward = 1
+    #     # if snake next to tail, negative reward
+    #     else:
+    #         reward = -1  # Snake is further from the food, negative reward
+    #
+    #     # snake can get caught in loop and never learn about the negative reward for that, so kill if we detect
+    #     # maybe add noise to the Q-values on inference?
+    #     # better idea is store the grid positions of the snake and if it ever repeats, give it a negative reward
+    #     # this will alter the path it will take next, which will help to avoid loops
+    #
+    #     detect_loops = True
+    #     if detect_loops:
+    #         snake_head = self.snake[0]
+    #         if self.grid_since_last_food[snake_head.x // self.block_size, snake_head.y // self.block_size] == 1:
+    #             # reward = -1
+    #             self.loop_count += 1
+    #
+    #             if not self.do_train and self.loop_count > 100:# and self.epsilon < 0.1:
+    #                 self.snake_alive = False
+    #                 self.death_reason = DeathReason.LOOP
+    #
+    #         self.grid_since_last_food[snake_head.x // self.block_size, snake_head.y // self.block_size] = 1
+    #
+    #     self.rewards.append(reward)
+    #
+    #     # fix
+    #     if self.dimensions[0] not in self.replay_memory:
+    #         self.replay_memory[self.dimensions[0]] = deque(maxlen=self.mem_size)
+    #     if not self.snake_alive:
+    #         reward = -5
+    #         self.replay_memory[self.dimensions[0]].append(
+    #             Experience(current.state, current.action, float(reward), current.state, not self.snake_alive))
+    #     else:
+    #         self.replay_memory[self.dimensions[0]].append(Experience(previous.state, previous.action, float(reward), current.state, not self.snake_alive))
+    #
+    #     if self.do_train:
+    #         loss = self.train()
+    #         self.losses.append(loss)
+    #
+    #     self.local_count += 1
+    #     global_count += 1
+    #
+    #     if global_count % self.target_model_update == 0:
+    #         self.target_model.load_state_dict(self.model.state_dict())
+    #         print("Updated target model")
+    #
+    #     if global_count % 5_000 == 0:
+    #         print(f"Global count: {global_count}")
+
+    # def train(self) -> float:
+    #     if global_count < self.train_start:
+    #         return 0
+    #
+    #     if len(self.replay_memory[self.dimensions[0]]) < self.batch_size:
+    #         batch = self.replay_memory[self.dimensions[0]]
+    #     else:
+    #         batch = random.sample(self.replay_memory[self.dimensions[0]], self.batch_size)
+    #     trewards = torch.tensor([exp.reward for exp in batch])
+    #     states = torch.stack([exp.state.grid for exp in batch])
+    #     actions = torch.tensor([exp.action.value for exp in batch])
+    #     # one-hot encode actions as all action values are equally valuable, e.g. 3 is not better than 2
+    #     # actions_onehot = self.get_onehot(actions)
+    #     next_states = torch.stack([exp.next_state.grid for exp in batch])
+    #     dead = torch.tensor([exp.dead for exp in batch])
+    #
+    #
+    #     batch_indices = torch.arange(len(actions))
+    #
+    #     discount_factor_tensor = torch.full_like(dead, self.discount_factor, dtype=torch.float32)
+    #     discount_factor_tensor = torch.where(dead, torch.zeros_like(discount_factor_tensor), discount_factor_tensor)
+    #
+    #     predicted = self.model(states)
+    #     y = predicted.clone()
+    #
+    #     # update each action with the expected q value, leave the rest the same as did not change
+    #     # DDQN https://arxiv.org/pdf/1509.06461.pdf
+    #     # use online model to pick action (y), use target model to evaluate q value (q)
+    #     q = torch.max(self.target_model(next_states), dim=1).values
+    #     y[batch_indices, actions] = trewards + discount_factor_tensor * q
+    #
+    #     self.model.train()
+    #
+    #     self.optimizer.zero_grad()
+    #     loss = self.criterion(predicted, y)
+    #     loss_float = loss.item()
+    #     loss.backward()
+    #     self.optimizer.step()
+    #
+    #     self.model.eval()
+    #
+    #     return loss_float
 
 
 if __name__ == "__main__":
     game_count = 0
     game_count_cap = 20_000
     epsilon_trigger = 0
-    desc = f"fromzero_e{epsilon_trigger}"
-    filename = f"qlearning_{desc}_{int(datetime.datetime.now().timestamp())}_{game_count_cap}.txt"
     state_dict = None
     scores = []
     _losses = []
@@ -404,13 +508,12 @@ if __name__ == "__main__":
     iterations = []
     iteration_foods = []
     running_trend = 50
-    epsilons = []
 
     # mps seems to be better at large batch sizes e.g. 1024-2048
     dev_name = "cpu"
-    dev_name = "mps"
-    torch.set_default_device("mps")
-    device = torch.device("mps")
+    # dev_name = "mps"
+    torch.set_default_device(dev_name)
+    device = torch.device(dev_name)
     # torch.set_default_device("cpu")
     # device = torch.device("cpu")
 
@@ -422,68 +525,56 @@ if __name__ == "__main__":
     checkpoint_file = "data/cnn/1703695105/model_1700.pth"
     action_every_n_frames = 1
 
+    agent = DDQNAgent(device, 4)
+
     while game_count < game_count_cap:
-        game = DeepQLearningSnakeGame(state_dict, True)
+        dqn_game = DeepQLearningSnakeGame(agent, True)
 
         # randomise dimensions between 50-250, for now always square
         dim = random.randint(5, 10) * 10 * 2
-        game.dimensions = (dim, dim)
-        print(f"Dimensions: {game.dimensions}")
-        game.dimensions = (100, 100)
+        dqn_game.dimensions = (dim, dim)
+        print(f"Dimensions: {dqn_game.dimensions}")
+        dqn_game.dimensions = (100, 100)
         if game_count == 0:
-            num_params = sum(p.numel() for p in game.model.parameters())
-            print(f"Number of parameters: {num_params}, mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
+            num_params = sum(p.numel() for p in agent.model.parameters())
+            print(f"Number of parameters: {num_params}, mean weight: {sum(p.sum() for p in agent.model.parameters()) / num_params}")
 
             if use_checkpoint:
                 checkpoint = torch.load(checkpoint_file, map_location=device)
-                game.model.load_state_dict(checkpoint["model_state_dict"])
-                game.target_model.load_state_dict(checkpoint["target_model_state_dict"])
-                game.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                agent.model.load_state_dict(checkpoint["model_state_dict"])
+                agent.target_model.load_state_dict(checkpoint["target_model_state_dict"])
+                agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
                 print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
-                print(f"New mean weight: {sum(p.sum() for p in game.model.parameters()) / num_params}")
+                print(f"New mean weight: {sum(p.sum() for p in agent.model.parameters()) / num_params}")
 
-            game.model.to(device)
-            game.target_model.to(device)
-
-            game.model.eval()
-            game.target_model.eval()
 
         if use_checkpoint:
             # todo figure out why setting this to False causes the game to stop working
             # my guess is that something in the model is not initialized properly
-            game.do_train = False
-        # if game_count % 100 == 0 and game_count > 90:
-        #     game.epsilon *= 0.5
-        # if game_count > epsilon_trigger:
-        #     game.epsilon = 0
-        game.epsilon = max(game.epsilon_min, 1.0 - (game_count / 200)**2)
+            agent.do_train = False
+
+        dqn_game.frametime = 50_000
         if use_checkpoint:
-            game.epsilon = 0.0
-        epsilons.append(game.epsilon)
-        game.frametime = 50_000
-        if use_checkpoint:
-            game.frametime = 50
-        game.action_every_n_frames = action_every_n_frames
-        game.play()
-        losses = game.losses
-        rewards = game.rewards
-        if not losses:
-            losses.append(0)
+            dqn_game.frametime = 50
+
+        agent.start_episode(game_count, dqn_game)
+        dqn_game.play()
+        game_data = agent.get_game_data(dqn_game)
+        if not game_data.losses:
+            game_data.losses.append(0)
         game_count += 1
-        print(f"Games: {game_count}, Score: {game.get_score()}, Epsilon: {game.epsilon}, Loss: {losses[-1]}")
-        state_dict = game.model.state_dict()
+        print(f"Games: {game_count}, Score: {game_data.score}, Epsilon: {agent.epsilon}, Loss: {game_data.losses[-1]}")
 
         # with open(filename, 'a') as f:
         #     f.write(f"{game_count},{game.get_score()},{game.death_reason}\n")
 
-        scores.append(game.get_score())
-        _losses.append(np.mean(losses))
-        _rewards_sum.append(np.sum(rewards))
-        _rewards_mean.append(np.mean(rewards))
-        death_reasons.append(game.death_reason)
-        iterations.append(game.local_count / game.get_score() if game.get_score() != 0 else game.local_count)
-        iteration_foods.append(np.mean(game.food_iterations))
+        scores.append(game_data.score)
+        _losses.append(np.mean(game_data.losses))
+        _rewards_sum.append(np.sum(game_data.rewards))
+        _rewards_mean.append(np.mean(game_data.rewards))
+        death_reasons.append(dqn_game.death_reason)
+        iterations.append(agent.current_game_steps / game_data.score if game_data.score != 0 else agent.current_game_steps)
 
         if game_count % running_trend == 0:
             # proportion of deaths
@@ -494,10 +585,10 @@ if __name__ == "__main__":
 
         num_almost_zero_weights = 0
         threshold = 1e-3
-        for name, param in game.model.named_parameters():
+        for name, param in agent.model.named_parameters():
             num_almost_zero_weights += torch.sum(torch.abs(param) < threshold).item()
 
-        sparsity = num_almost_zero_weights / sum(p.numel() for p in game.model.parameters())
+        sparsity = num_almost_zero_weights / sum(p.numel() for p in agent.model.parameters())
         # print(f"Sparsity: {sparsity}")
 
 
@@ -507,12 +598,12 @@ if __name__ == "__main__":
 
         plt.clf()
 
-        fig, axs = plt.subplots(7, figsize=(5, 10), sharex=True)
+        fig, axs = plt.subplots(6, figsize=(5, 10), sharex=True)
         fig.subplots_adjust(top=0.95)
         if use_checkpoint:
             fig.suptitle(f"Inference on {checkpoint_file}")
         else:
-            fig.suptitle(f'Train {timestamp}: LR={game.learning_rate}, BS={game.batch_size} DIMS={game.dimensions[0]}x{game.dimensions[1]}')
+            fig.suptitle(f'Train {timestamp}: LR={agent.learning_rate}, BS={agent.batch_size} DIMS={dqn_game.dimensions[0]}x{dqn_game.dimensions[1]}')
 
         running_trend_x = [(1+i) * running_trend for i in range(len(tail_deaths))]
 
@@ -529,7 +620,7 @@ if __name__ == "__main__":
         axs[1].set_ylabel('Loss')
         axs[1].plot(_losses, 'k')
         axs[1].set_ylim(ymin=0)
-        axs[1].text(len(losses) - 1, losses[-1], str(losses[-1]))
+        axs[1].text(len(game_data.losses) - 1, game_data.losses[-1], str(game_data.losses[-1]))
 
         # axs[2].set_ylabel('Rew.S')
         # axs[2].plot(_rewards_sum, 'k')
@@ -542,7 +633,7 @@ if __name__ == "__main__":
         axs[2].set_ylabel('Rew.M')
         axs[2].plot(_rewards_mean, 'k')
         axs[2].set_ylim(ymin=0)
-        axs[2].text(len(rewards) - 1, rewards[-1], str(rewards[-1]))
+        axs[2].text(len(game_data.rewards) - 1, game_data.rewards[-1], str(game_data.rewards[-1]))
 
         axs[3].set_ylabel('Death')
         axs[3].plot(running_trend_x, tail_deaths, 'x', label="Tail", color="red")
@@ -552,21 +643,21 @@ if __name__ == "__main__":
         axs[3].legend(loc="upper left")
 
         axs[4].set_ylabel('Eps')
-        axs[4].plot(epsilons, 'k')
+        axs[4].plot(agent.epsilons, 'k')
         axs[4].set_ylim(ymin=0, ymax=1)
-        axs[4].text(len(epsilons) - 1, epsilons[-1], str(epsilons[-1]))
+        axs[4].text(len(agent.epsilons) - 1, agent.epsilons[-1], str(agent.epsilons[-1]))
 
         axs[5].set_ylabel('Its. T')
         axs[5].plot(iterations, 'k')
         axs[5].set_ylim(ymin=0)
         axs[5].text(len(iterations) - 1, iterations[-1], str(iterations[-1]))
+        #
+        # axs[6].set_ylabel('Its. M')
+        # axs[6].plot(iteration_foods, 'k')
+        # axs[6].set_ylim(ymin=0)
+        # axs[6].text(len(iteration_foods) - 1, iteration_foods[-1], str(iteration_foods[-1]))
 
-        axs[6].set_ylabel('Its. M')
-        axs[6].plot(iteration_foods, 'k')
-        axs[6].set_ylim(ymin=0)
-        axs[6].text(len(iteration_foods) - 1, iteration_foods[-1], str(iteration_foods[-1]))
-
-        axs[6].set_xlabel('Number of Games')
+        axs[5].set_xlabel('Number of Games')
 
 
         fig.canvas.draw()
@@ -580,7 +671,7 @@ if __name__ == "__main__":
             os.makedirs(directory, exist_ok=True)
             torch.save({
                 "epoch": game_count,
-                "model_state_dict": game.model.state_dict(),
-                "target_model_state_dict": game.target_model.state_dict(),
-                "optimizer_state_dict": game.optimizer.state_dict(),
+                "model_state_dict": agent.model.state_dict(),
+                "target_model_state_dict": agent.target_model.state_dict(),
+                "optimizer_state_dict": agent.optimizer.state_dict(),
             }, f"{directory}/model_{game_count}.pth")

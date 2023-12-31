@@ -6,6 +6,7 @@ import random
 from typing import List, Tuple, Any
 from misc import Direction, Coordinate
 from enum import Enum
+import abc
 
 
 class DeathReason(Enum):
@@ -15,8 +16,22 @@ class DeathReason(Enum):
     LOOP = 2
 
 
+class Agent(abc.ABC):
+    def __init__(self, num_actions):
+        self.num_actions = num_actions
+
+    @abc.abstractmethod
+    def act(self, game: 'AbstractSnakeGame'):
+        pass
+
+    @abc.abstractmethod
+    def start_episode(self, episode_num):
+        pass
+
+
+
 class AbstractSnakeGame:
-    def __init__(self, use_renderer, dimensions: Tuple[int, int] = (600, 400)):
+    def __init__(self, agent: Agent, use_renderer, dimensions: Tuple[int, int] = (600, 400)):
         self.render = use_renderer
         self.snake_alive: bool = True
         self.snake: List[Coordinate] = []
@@ -28,6 +43,8 @@ class AbstractSnakeGame:
         self.frametime: int = 10
         self.move_direction: Direction = Direction.NONE
         self.death_reason: DeathReason = DeathReason.NONE
+
+        self.agent: Agent = agent
 
     def play(self):
         self.make_walls()
@@ -42,7 +59,8 @@ class AbstractSnakeGame:
 
         while self.snake_alive:
             self.handle_events()
-            self.update()
+            self.agent.act(self)
+            # self.update()
             if self.render:
                 self.draw()
                 self.clock.tick(self.frametime)
@@ -62,18 +80,6 @@ class AbstractSnakeGame:
                 if event.type == pygame.QUIT:
                     self.snake_alive = False
 
-        new_direction = self.get_action()
-        if new_direction == Direction.NONE and self.move_direction == Direction.NONE:
-            return
-
-        if new_direction != Direction.NONE:
-            self.move_direction = new_direction
-
-        self.move_snake()
-
-    def get_action(self) -> Direction:
-        return NotImplemented
-
     def move_snake(self):
         vector = self.move_direction.to_vector()
         new_head = Coordinate(self.snake[0].x + vector[0] * self.block_size, self.snake[0].y + vector[1] * self.block_size)
@@ -91,7 +97,8 @@ class AbstractSnakeGame:
         self.snake.pop()
 
     def update(self):
-        self.check_collision()
+        if self.snake_alive:  # may have already been checked (bad code)
+            self.check_collision()
 
         if self.food_eaten():
             self.food_location = self.generate_food()
