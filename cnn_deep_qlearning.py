@@ -41,7 +41,8 @@ class State:
 class Experience:
     state: State
     action: Direction
-    reward: float = 0.0
+    reward: float
+    _step: int
 
 @dataclass
 class History:
@@ -92,7 +93,7 @@ class DDQNAgent(nn.Module, Agent):
         self.model.apply(weights_init)
 
         self.target_model = deepcopy(self.model)
-        self.target_model_update = 10_000
+        self.target_model_update = 10_00
 
         self.learning_rate = 0.001
         self.discount_factor = 0.95
@@ -116,6 +117,7 @@ class DDQNAgent(nn.Module, Agent):
 
         self.do_train = True
 
+        self.total_steps = 0
         self.current_game_steps = 0
         self.grid_since_last_food = None
         self.loop_count = 0
@@ -131,37 +133,34 @@ class DDQNAgent(nn.Module, Agent):
         state = self.get_state(game)
         action = self.get_action(state)
 
-        self.experience_memory.append(Experience(state, action))
-
         game.move_direction = action
         game.move_snake()
         game.update()
 
         self.current_game_steps += 1
+        self.total_steps += 1
 
-        # todo figure out a nice way to handle this case
-        # i imagine an issue where the first states poison the memory
-        if len(self.experience_memory) < 2:
-            return
+        next_state = self.get_state(game)
 
-        if len(self.experience_memory) % self.target_model_update == 0:
+        # death is complicated; we set the "previous" state to death so we actually register it.
+        # setting a future state as death doesnt do anything as there is no next state to update
+        # we care about being 1 step before death + action that causes death, which is done in the training.
+        state.died = not game.snake_alive
+        if state.died:
+            self.game_end_indices.append(self.total_steps)
+
+        if self.total_steps % self.target_model_update == 0:
             self.target_model.load_state_dict(self.model.state_dict())
             print("Updated target model")
 
-        reward = self.get_reward(game)
+        reward = self.get_reward(state, next_state, game)
         self.rewards.append(reward)
 
-        died = not game.snake_alive
-        if died:
-            self.game_end_indices.append(len(self.experience_memory)-1)
+        self.experience_memory.append(Experience(state, action, reward, _step=self.total_steps))
 
-        self.experience_memory[-1].reward = reward if not died else -5
-        self.experience_memory[-1].state.died = died
-
-        if len(self.experience_memory) >= self.training_start and self.do_train:
+        if self.total_steps >= self.training_start and self.do_train:
             loss = self.train()
             self.losses.append(loss)
-
 
     def get_action(self, state: State) -> Direction:
         # return randrange(self.num_actions)
@@ -196,16 +195,13 @@ class DDQNAgent(nn.Module, Agent):
         grid = torch.tensor(grid, dtype=torch.float32).permute(2, 0, 1)
         return grid
 
-    def get_reward(self, game: AbstractSnakeGame) -> float:
-        current = self.experience_memory[-1]
-        previous = self.experience_memory[-2]
-
-        # reward is defined as acquired AFTER the action is taken (SARSA), so this is previous-state reward
-
-        if current.state.food_position != previous.state.food_position:
+    def get_reward(self, state: State, next_state: State, game: AbstractSnakeGame) -> float:
+        if state.died:
+            reward = -5
+        elif next_state.food_position != state.food_position:
             reward = 3
             self.grid_since_last_food = np.zeros((game.dimensions[0] // game.block_size, game.dimensions[1] // game.block_size))
-        elif abs(current.state.distance_to_food.x) < abs(previous.state.distance_to_food.x) or abs(current.state.distance_to_food.y) < abs(previous.state.distance_to_food.y):
+        elif abs(next_state.distance_to_food.x) < abs(state.distance_to_food.x) or abs(next_state.distance_to_food.y) < abs(state.distance_to_food.y):
             reward = 1
         else:
             reward = -1
@@ -222,7 +218,6 @@ class DDQNAgent(nn.Module, Agent):
                     game.death_reason = DeathReason.LOOP
 
             self.grid_since_last_food[snake_head.x // game.block_size, snake_head.y // game.block_size] = 1
-
 
         return reward
 
@@ -252,7 +247,7 @@ class DDQNAgent(nn.Module, Agent):
         predicted = self.model(states)
         y = predicted.clone()
 
-        q = torch.max(self.model(next_states), dim=1).values
+        q = torch.max(self.target_model(next_states), dim=1).values
         r = torch.arange(len(batch))
         y[r, actions] = rewards + self.discount_factor * q * dead_mask
 
