@@ -69,7 +69,7 @@ class GameData:
     epsilons: List[float]
     rewards: List[float]
     losses: List[float]
-    score: int
+    steps: int
 
 
 class DDQNAgent(nn.Module, Agent):
@@ -90,7 +90,7 @@ class DDQNAgent(nn.Module, Agent):
             nn.Linear(256, num_actions)
         )
         self.model.to(self.device)
-        self.model.apply(weights_init)
+        # self.model.apply(weights_init)
 
         self.target_model = deepcopy(self.model)
         self.target_model_update = 10_00
