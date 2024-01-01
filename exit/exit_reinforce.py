@@ -82,7 +82,7 @@ class REINFORCEExitAgent(nn.Module, Agent):
         self.loop_count = 0
 
     def start_episode(self, episode_num, game):
-        self.epsilon = max(self.epsilon_min, 1.0 - episode_num / self.epsilon_cutoff)
+        self.epsilon = max(self.epsilon_min, 1.0 - episode_num / self.epsilon_cutoff) if self.epsilon_cutoff > 0 else 0
         self.epsilons.append(self.epsilon)
         self.current_game_steps = 0
         self.experience_memory = []
@@ -151,7 +151,7 @@ class REINFORCEExitAgent(nn.Module, Agent):
         if state.complete:
             reward = 1
         else:
-            reward = -1
+            reward = 0
         return reward
 
     def train(self, game) -> None:
@@ -171,6 +171,7 @@ class REINFORCEExitAgent(nn.Module, Agent):
             self.optimizer.zero_grad()
             gradients_wrt_params(self.model, policy_loss)
             update_params(self.model, self.learning_rate * self.discount_factor ** t * empirical_discounted_reward)
+
 
         self.losses.append(total_loss)
         self.rewards.append(total_reward)
@@ -217,13 +218,14 @@ if __name__ == "__main__":
     device = torch.device(dev_name)
 
     agent = REINFORCEExitAgent(device, 4)
-    agent.epsilon_cutoff = 10
-    agent.epsilon_min = 0
+    agent.epsilon_cutoff = 0
+    agent.epsilon_min = 0.01
     game_count = 0
     game_count_cap = 20_000
     while game_count < game_count_cap:
-        egame = ExitGame(agent, True)
+        egame = ExitGame(agent, False)
         egame.frametime = 50_000
+        # egame.dimensions = (200, 200)
         agent.start_episode(game_count, egame)
         egame.play()
         agent.train(egame)

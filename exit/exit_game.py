@@ -2,6 +2,8 @@
 simpler version of snake game where only one cube and one food always in same location
 used to prove out models with one of the simplest possible games
 """
+import random
+
 import pygame
 from typing import Tuple
 
@@ -59,14 +61,15 @@ class ExitGame(AbstractGame):
             self.clock = pygame.time.Clock()
             self.display = pygame.display.set_mode(self.dimensions)
 
-        self.agent_position = Coordinate(((self.dimensions[0] // self.block_size) // 2) * self.block_size, ((self.dimensions[1] // self.block_size) // 2) * self.block_size)
+        # self.agent_position = Coordinate(((self.dimensions[0] // self.block_size) // 2) * self.block_size, ((self.dimensions[1] // self.block_size) // 2) * self.block_size)
+        # random agent position
+        self.agent_position = Coordinate(random.randint(2, self.dimensions[0] // self.block_size - 2) * self.block_size, random.randint(2, self.dimensions[1] // self.block_size - 2) * self.block_size)
         # self.exit_position = self.generate_food()
         self.exit_position = Coordinate(self.block_size, self.block_size)
 
         while not self.at_exit:
             self.handle_events()
             self.agent.act(self)
-            self.at_exit = self.agent_position.x == self.exit_position.x and self.agent_position.y == self.exit_position.y
             # self.update()
             if self.render:
                 self.draw()
@@ -97,6 +100,8 @@ class ExitGame(AbstractGame):
             return
 
         self.agent_position = new_pos
+
+        self.at_exit = self.agent_position.x == self.exit_position.x and self.agent_position.y == self.exit_position.y
 
     def draw(self):
         self.display.fill((0, 0, 0))
