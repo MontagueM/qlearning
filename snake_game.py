@@ -3,10 +3,11 @@
 
 import pygame
 import random
-from typing import List, Tuple, Any
+from typing import List, Tuple
+
+from exit.exit_game import Agent, AbstractGame
 from misc import Direction, Coordinate
 from enum import Enum
-import abc
 
 
 class DeathReason(Enum):
@@ -16,21 +17,7 @@ class DeathReason(Enum):
     LOOP = 2
 
 
-class Agent(abc.ABC):
-    def __init__(self, num_actions):
-        self.num_actions = num_actions
-
-    @abc.abstractmethod
-    def act(self, game: 'AbstractSnakeGame'):
-        pass
-
-    @abc.abstractmethod
-    def start_episode(self, episode_num):
-        pass
-
-
-
-class AbstractSnakeGame:
+class AbstractSnakeGame(AbstractGame):
     def __init__(self, agent: Agent, use_renderer, dimensions: Tuple[int, int] = (600, 400)):
         self.render = use_renderer
         self.snake_alive: bool = True
@@ -80,7 +67,7 @@ class AbstractSnakeGame:
                 if event.type == pygame.QUIT:
                     self.snake_alive = False
 
-    def move_snake(self):
+    def act(self):
         vector = self.move_direction.to_vector()
         new_head = Coordinate(self.snake[0].x + vector[0] * self.block_size, self.snake[0].y + vector[1] * self.block_size)
         # if new head is out of bounds, move it to the other side
